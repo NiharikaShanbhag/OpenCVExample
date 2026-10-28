@@ -1,39 +1,37 @@
-﻿
-#include "Utilities.h"
+﻿#include "Utilities.h"
+#include <string>
 
+const int TABLE_ROWS = 683;
+const int TABLE_COLS = 1434;
+const int NUMBER_OF_IMAGES = 7;
 
-void MyApplication()
-{
-	char* file_location = "Media/Pool/";
-	char* pool_files[] = {
-		"AllBalls.jpeg",
-		"Table1.jpeg",
-		"Table2.jpeg",
-		"Table3.jpeg",
-		"Table4.jpeg",
-		"Table5.jpeg",
-		"Table6.jpeg"
-	};
+const char* const FILE_LOCATION = "Media/Pool/";
+const char* const POOL_FILES[NUMBER_OF_IMAGES] = {
+	"AllBalls.jpeg",
+	"Table1.jpeg",
+	"Table2.jpeg",
+	"Table3.jpeg",
+	"Table4.jpeg",
+	"Table5.jpeg",
+	"Table6.jpeg"
+};
 
-	// Load images
-	int number_of_images = sizeof(pool_files) / sizeof(pool_files[0]);
-	Mat* pool_image = new Mat[number_of_images];
-	//Mat* new_pool_image = new Mat[number_of_images];
-	for (int file_no = 0; (file_no < number_of_images); file_no++)
-	{
-		cout << pool_files[file_no] << endl;
-		string filename(file_location);
-		filename.append(pool_files[file_no]);
-		pool_image[file_no] = imread(filename, -1);
+void MyApplication() {
+	namedWindow("Original", WINDOW_NORMAL);
 
-		if (pool_image[file_no].empty())
-		{
-			cout << "Could not open " << pool_image[file_no] << endl;
+	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++) {
+		string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
+		Mat image = imread(filename, IMREAD_COLOR);
+		if (image.empty()) {
+			cout << "Could not open or find the image: " << filename << endl;
+			continue;
 		}
-		imshow(pool_files[file_no], pool_image[file_no]);
 
-		char pause = cv::waitKey();  // This introduces a delay between frame.  The length of the delay/number can be reduced.
+		cout << POOL_FILES[image_no] << " - press any key for the next image" << endl;
+
+		imshow("Original", image);
+		waitKey(0);
 	}
 
+	destroyAllWindows();
 }
-
