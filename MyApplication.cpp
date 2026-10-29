@@ -33,6 +33,8 @@ const Point2f TABLE_CORNERS[4] = {
 	Point2f(0.0f, (float)(TABLE_ROWS - 1)),		
 };
 
+const int MEDIAN_FILTER_SIZE = 5;
+
 // rectify the table (perspective transformation)
 Mat RectifyTable(const Mat& image, const Mat& perspective_matrix) {
 	Mat table_image;
@@ -52,9 +54,34 @@ Mat DrawTableCorners(const Mat& image) {
 	return display;
 }
 
+Mat SmoothImage(const Mat& table_image) {
+	Mat smoothed_image;
+	medianBlur(table_image, smoothed_image, MEDIAN_FILTER_SIZE);
+	return smoothed_image;
+}
+
+// zoomed side-by-side of the same region (original | Gaussian | median)
+Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
+	Mat gaussian_image;
+	GaussianBlur(table_image, gaussian_image, Size(MEDIAN_FILTER_SIZE, MEDIAN_FILTER_SIZE), 1.5);
+
+	const Rect region(880, 220, 300, 150);
+	const int zoom = 3;
+	Mat zoomed[3];
+	resize(table_image(region), zoomed[0], Size(), zoom, zoom, INTER_NEAREST);
+	resize(gaussian_image(region), zoomed[1], Size(), zoom, zoom, INTER_NEAREST);
+	resize(median_image(region), zoomed[2], Size(), zoom, zoom, INTER_NEAREST);
+
+	Mat comparison;
+	hconcat(zoomed, 3, comparison);
+	return comparison;
+}
+
 // save an image to the results folder
 void SaveResult(const string& step_name, int image_no, const Mat& image) {
-	string filename = string(RESULTS_LOCATION) + step_name + "_" + POOL_FILES[image_no];
+	string image_name = POOL_FILES[image_no];
+	image_name = image_name.substr(0, image_name.find('.'));      
+	string filename = string(RESULTS_LOCATION) + step_name + "_" + image_name + ".png";
 	if (!imwrite(filename, image))
 		cout << "Could not save " << filename << " (does the Results folder exist?)" << endl;
 }
@@ -63,8 +90,9 @@ void MyApplication() {
 	Mat perspective_matrix = getPerspectiveTransform(IMAGE_CORNERS, TABLE_CORNERS);
 	cout << "Perspective transformation matrix:" << endl << perspective_matrix << endl << endl;
 
-	namedWindow("Original", WINDOW_NORMAL);
 	namedWindow("Rectified table", WINDOW_NORMAL);
+	namedWindow("Smoothed", WINDOW_NORMAL);
+	namedWindow("Zoom: original | Gaussian | median", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -77,14 +105,20 @@ void MyApplication() {
 		}
 		cout << POOL_FILES[image_no] << " - press any key for the next image" << endl;
 
-		Mat corners_image = DrawTableCorners(image);
+		// Step 1: rectify
 		Mat table_image = RectifyTable(image, perspective_matrix);
-
-		imshow("Original", corners_image);
-		imshow("Rectified table", table_image);
-		SaveResult("Step1_Corners", image_no, corners_image);
+		SaveResult("Step1_Corners", image_no, DrawTableCorners(image));
 		SaveResult("Step1_Rectified", image_no, table_image);
 
+		// Step 2: smooth
+		Mat smoothed_image = SmoothImage(table_image);
+		Mat comparison = MakeSmoothingComparison(table_image, smoothed_image);
+		SaveResult("Step2_Smoothed", image_no, smoothed_image);
+		SaveResult("Step2_Comparison", image_no, comparison);
+
+		imshow("Rectified table", table_image);
+		imshow("Smoothed", smoothed_image);
+		imshow("Zoom: original | Gaussian | median", comparison);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
