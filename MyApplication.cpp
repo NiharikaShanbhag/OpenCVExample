@@ -4,6 +4,7 @@
 const int TABLE_ROWS = 683;
 const int TABLE_COLS = 1434;
 const int NUMBER_OF_IMAGES = 7;
+const int TRAINING_IMAGE_INDEX = 0;
 
 const char* const FILE_LOCATION = "Media/Pool/";
 const char* const RESULTS_LOCATION = "Media/Pool/Results/";
@@ -34,6 +35,17 @@ const Point2f TABLE_CORNERS[4] = {
 };
 
 const int MEDIAN_FILTER_SIZE = 5;
+
+const Rect CLOTH_SAMPLE_REGION(50, 80, 600, 520);
+
+
+const int HUE_BINS = 36;             
+const int SATURATION_BINS = 32;      
+const int HS_CHANNELS[] = { 0, 2 };
+const int HS_BINS[] = { HUE_BINS, SATURATION_BINS };
+const float HUE_RANGE[] = { 0.0f, 180.0f };
+const float SATURATION_RANGE[] = { 0.0f, 256.0f };
+const float* HS_RANGES[] = { HUE_RANGE, SATURATION_RANGE };
 
 // rectify the table (perspective transformation)
 Mat RectifyTable(const Mat& image, const Mat& perspective_matrix) {
@@ -77,6 +89,49 @@ Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
 	return comparison;
 }
 
+// build the cloth model: 2D hue-saturation histogram of the cloth sample from the training image
+MatND BuildClothModel(const Mat& smoothed_training_image) {
+	Mat hls_image;
+	cvtColor(smoothed_training_image, hls_image, COLOR_BGR2HLS);
+	Mat cloth_sample = hls_image(CLOTH_SAMPLE_REGION);
+
+	MatND cloth_histogram;
+	calcHist(&cloth_sample, 1, HS_CHANNELS, Mat(), cloth_histogram, 2, HS_BINS, HS_RANGES);
+
+	// normalise so the most common cloth colour = 255 (i.e. 1.0)
+	normalize(cloth_histogram, cloth_histogram, 0.0, 255.0, NORM_MINMAX);
+	return cloth_histogram;
+}
+
+// for the report: where the cloth samples were taken from
+Mat DrawClothSampleRegion(const Mat& training_image) {
+	Mat display = training_image.clone();
+	rectangle(display, CLOTH_SAMPLE_REGION, Scalar(255, 0, 255), 3);
+	return display;
+}
+
+// for the report: the 2D histogram as an image
+Mat DrawClothHistogram(const MatND& cloth_histogram) {
+	const int cell_size = 12;
+	Mat display(HUE_BINS * cell_size, SATURATION_BINS * cell_size, CV_8UC1, Scalar(0));
+	for (int hue_bin = 0; hue_bin < HUE_BINS; hue_bin++)
+		for (int saturation_bin = 0; saturation_bin < SATURATION_BINS; saturation_bin++) {
+			float value = cloth_histogram.at<float>(hue_bin, saturation_bin);
+			Rect cell(saturation_bin * cell_size, hue_bin * cell_size, cell_size, cell_size);
+			rectangle(display, cell, Scalar(value), FILLED);
+		}
+	return display;
+}
+
+// load one of the pool images
+Mat LoadImage(int image_no) {
+	string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
+	Mat image = imread(filename, IMREAD_COLOR);
+	if (image.empty())
+		cout << "Could not open " << filename << endl;
+	return image;
+}
+
 // save an image to the results folder
 void SaveResult(const string& step_name, int image_no, const Mat& image) {
 	string image_name = POOL_FILES[image_no];
@@ -90,19 +145,36 @@ void MyApplication() {
 	Mat perspective_matrix = getPerspectiveTransform(IMAGE_CORNERS, TABLE_CORNERS);
 	cout << "Perspective transformation matrix:" << endl << perspective_matrix << endl << endl;
 
+	// ---- Training: build the cloth colour model from AllBalls.jpeg ONLY ----
+	Mat training_image = LoadImage(TRAINING_IMAGE_INDEX);
+	if (training_image.empty())
+		return;
+	Mat training_smoothed = SmoothImage(RectifyTable(training_image, perspective_matrix));
+	MatND cloth_histogram = BuildClothModel(training_smoothed);
+
+	Mat sample_display = DrawClothSampleRegion(training_smoothed);
+	Mat histogram_display = DrawClothHistogram(cloth_histogram);
+	SaveResult("Step3_ClothSample", TRAINING_IMAGE_INDEX, sample_display);
+	SaveResult("Step3_ClothHistogram", TRAINING_IMAGE_INDEX, histogram_display);
+
+	namedWindow("Cloth sample region", WINDOW_NORMAL);
+	namedWindow("Cloth histogram (rows = hue, cols = saturation)", WINDOW_AUTOSIZE);
+	imshow("Cloth sample region", sample_display);
+	imshow("Cloth histogram (rows = hue, cols = saturation)", histogram_display);
+	cout << "Cloth model built - press any key to process the images" << endl;
+	waitKey(0);
+	cv::destroyAllWindows();
+
+	// ---- Process every image ----
 	namedWindow("Rectified table", WINDOW_NORMAL);
 	namedWindow("Smoothed", WINDOW_NORMAL);
 	namedWindow("Zoom: original | Gaussian | median", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
-		string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
-		Mat image = imread(filename, IMREAD_COLOR);
+		Mat image = LoadImage(image_no);
 		if (image.empty())
-		{
-			cout << "Could not open " << filename << endl;
 			continue;
-		}
 		cout << POOL_FILES[image_no] << " - press any key for the next image" << endl;
 
 		// Step 1: rectify
