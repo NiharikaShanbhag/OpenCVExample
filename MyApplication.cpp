@@ -1,5 +1,6 @@
 ﻿#include "Utilities.h"
 #include <string>
+#include <cmath>
 
 const int TABLE_ROWS = 683;
 const int TABLE_COLS = 1434;
@@ -193,6 +194,41 @@ Mat ComputeClothProbability(const Mat& smoothed_image, const MatND& cloth_histog
 	return cloth_probability;
 }
 
+// threshold the cloth probability with Otsu's method -> binary mask
+// INVERSE threshold: low cloth probability -> white (255) = candidate ball, cloth -> black (0)
+Mat ThresholdClothProbability(const Mat& cloth_probability, double& otsu_threshold) {
+	Mat ball_mask;
+	otsu_threshold = threshold(cloth_probability, ball_mask, 0, 255, THRESH_BINARY_INV | THRESH_OTSU);
+	return ball_mask;
+}
+
+// for the report: histogram of the cloth probability image (log scale so small counts are visible)
+// with Otsu's threshold marked as a red line
+Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
+	int number_bins = 256;
+	int channels[] = { 0 };
+	float range[] = { 0.0f, 256.0f };
+	const float* ranges[] = { range };
+	MatND histogram;
+	calcHist(&cloth_probability, 1, channels, Mat(), histogram, 1, &number_bins, ranges);
+
+	const int height = 200;
+	const int bar_width = 2;
+	Mat display(height, number_bins * bar_width, CV_8UC3, Scalar(255, 255, 255));
+	double max_count;
+	minMaxLoc(histogram, nullptr, &max_count);
+	double log_max = log(1.0 + max_count);
+	for (int bin = 0; bin < number_bins; bin++) {
+		double count = histogram.at<float>(bin);
+		int bar_height = (int)(height * log(1.0 + count) / log_max);
+		rectangle(display, Point(bin * bar_width, height - bar_height),
+			Point(bin * bar_width + bar_width - 1, height - 1), Scalar(0, 0, 0), FILLED);
+	}
+	int threshold_x = (int)otsu_threshold * bar_width;
+	line(display, Point(threshold_x, 0), Point(threshold_x, height - 1), Scalar(0, 0, 255), 2);
+	return display;
+}
+
 // load one of the pool images
 Mat LoadImage(int image_no) {
 	string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
@@ -237,8 +273,9 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Smoothed", WINDOW_NORMAL);
 	namedWindow("Cloth probability", WINDOW_NORMAL);
+	namedWindow("Ball mask (white = not cloth)", WINDOW_NORMAL);
+	namedWindow("Probability histogram (log scale, red = Otsu threshold)", WINDOW_AUTOSIZE);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -261,8 +298,17 @@ void MyApplication() {
 		Mat cloth_probability = ComputeClothProbability(smoothed_image, cloth_histogram);
 		SaveResult("Step3_ClothProbability", image_no, cloth_probability);
 
-		imshow("Smoothed", smoothed_image);
+		// Step 4: threshold (Otsu) -> binary mask of candidate ball pixels
+		double otsu_threshold;
+		Mat ball_mask = ThresholdClothProbability(cloth_probability, otsu_threshold);
+		Mat probability_histogram = DrawProbabilityHistogram(cloth_probability, otsu_threshold);
+		cout << "   Otsu threshold = " << otsu_threshold << endl;
+		SaveResult("Step4_Mask", image_no, ball_mask);
+		SaveResult("Step4_Histogram", image_no, probability_histogram);
+
 		imshow("Cloth probability", cloth_probability);
+		imshow("Ball mask (white = not cloth)", ball_mask);
+		imshow("Probability histogram (log scale, red = Otsu threshold)", probability_histogram);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
