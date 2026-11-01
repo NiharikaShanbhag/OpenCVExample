@@ -123,6 +123,16 @@ Mat DrawClothHistogram(const MatND& cloth_histogram) {
 	return display;
 }
 
+// back-projection: each pixel gets the histogram value for its (hue, saturation)
+// bright = looks like cloth, dark = does not (candidate ball)
+Mat ComputeClothProbability(const Mat& smoothed_image, const MatND& cloth_histogram) {
+	Mat hls_image;
+	cvtColor(smoothed_image, hls_image, COLOR_BGR2HLS);
+	Mat cloth_probability;
+	calcBackProject(&hls_image, 1, HS_CHANNELS, cloth_histogram, cloth_probability, HS_RANGES, 1.0);
+	return cloth_probability;
+}
+
 // load one of the pool images
 Mat LoadImage(int image_no) {
 	string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
@@ -166,9 +176,8 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Rectified table", WINDOW_NORMAL);
 	namedWindow("Smoothed", WINDOW_NORMAL);
-	namedWindow("Zoom: original | Gaussian | median", WINDOW_NORMAL);
+	namedWindow("Cloth probability", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -184,13 +193,15 @@ void MyApplication() {
 
 		// Step 2: smooth
 		Mat smoothed_image = SmoothImage(table_image);
-		Mat comparison = MakeSmoothingComparison(table_image, smoothed_image);
 		SaveResult("Step2_Smoothed", image_no, smoothed_image);
-		SaveResult("Step2_Comparison", image_no, comparison);
+		SaveResult("Step2_Comparison", image_no, MakeSmoothingComparison(table_image, smoothed_image));
 
-		imshow("Rectified table", table_image);
+		// Step 3: cloth probability (back-projection of the cloth model)
+		Mat cloth_probability = ComputeClothProbability(smoothed_image, cloth_histogram);
+		SaveResult("Step3_ClothProbability", image_no, cloth_probability);
+
 		imshow("Smoothed", smoothed_image);
-		imshow("Zoom: original | Gaussian | median", comparison);
+		imshow("Cloth probability", cloth_probability);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
