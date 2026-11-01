@@ -36,7 +36,20 @@ const Point2f TABLE_CORNERS[4] = {
 
 const int MEDIAN_FILTER_SIZE = 5;
 
-const Rect CLOTH_SAMPLE_REGION(50, 80, 600, 520);
+// Cloth sample = the whole table in the TRAINING image (AllBalls.jpeg), except:
+//  - a border along the cushions, where the cushions and pockets are
+//  - the area containing the balls, found from the AllBalls ground truth
+//    (box around all 16 balls, expanded by 2 ball diameters to cover the stretched balls)
+const int BALL_DIAMETER = 43;     // mm, from the brief
+const int CUSHION_MARGIN = 60;    // mm
+const int NUMBER_OF_BALLS = 16;
+// AllBalls ground truth ball positions as (column, row), from the brief
+const Point ALLBALLS_BALL_POSITIONS[NUMBER_OF_BALLS] = {
+	Point(797, 293),  Point(908, 253),  Point(959, 250),  Point(1013, 255),
+	Point(1072, 256), Point(1132, 254), Point(1184, 262), Point(1244, 256),
+	Point(1307, 253), Point(901, 329),  Point(961, 330),  Point(1013, 335),
+	Point(1067, 336), Point(1130, 334), Point(1187, 345), Point(1245, 342)
+};
 
 
 const int HUE_BINS = 36;             
@@ -89,24 +102,47 @@ Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
 	return comparison;
 }
 
+// which pixels of the training image are used as cloth samples (255 = sample, 0 = excluded)
+Mat MakeClothSampleMask() {
+	// start with the table interior, away from the cushions and pockets
+	Mat mask(TABLE_ROWS, TABLE_COLS, CV_8UC1, Scalar(0));
+	rectangle(mask, Rect(CUSHION_MARGIN, CUSHION_MARGIN,
+		TABLE_COLS - 2 * CUSHION_MARGIN, TABLE_ROWS - 2 * CUSHION_MARGIN), Scalar(255), FILLED);
+
+	// find the box containing all the balls (from the training ground truth)
+	int min_col = TABLE_COLS, max_col = 0, min_row = TABLE_ROWS, max_row = 0;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++) {
+		min_col = min(min_col, ALLBALLS_BALL_POSITIONS[ball].x);
+		max_col = max(max_col, ALLBALLS_BALL_POSITIONS[ball].x);
+		min_row = min(min_row, ALLBALLS_BALL_POSITIONS[ball].y);
+		max_row = max(max_row, ALLBALLS_BALL_POSITIONS[ball].y);
+	}
+
+	// expand it by 2 ball diameters and remove it from the sample
+	int expand = 2 * BALL_DIAMETER;
+	rectangle(mask, Point(min_col - expand, min_row - expand),
+		Point(max_col + expand, max_row + expand), Scalar(0), FILLED);
+	return mask;
+}
+
 // build the cloth model: 2D hue-saturation histogram of the cloth sample from the training image
-MatND BuildClothModel(const Mat& smoothed_training_image) {
+MatND BuildClothModel(const Mat& smoothed_training_image, const Mat& sample_mask) {
 	Mat hls_image;
 	cvtColor(smoothed_training_image, hls_image, COLOR_BGR2HLS);
-	Mat cloth_sample = hls_image(CLOTH_SAMPLE_REGION);
 
 	MatND cloth_histogram;
-	calcHist(&cloth_sample, 1, HS_CHANNELS, Mat(), cloth_histogram, 2, HS_BINS, HS_RANGES);
+	calcHist(&hls_image, 1, HS_CHANNELS, sample_mask, cloth_histogram, 2, HS_BINS, HS_RANGES);
 
 	// normalise so the most common cloth colour = 255 (i.e. 1.0)
 	normalize(cloth_histogram, cloth_histogram, 0.0, 255.0, NORM_MINMAX);
 	return cloth_histogram;
 }
 
-// for the report: where the cloth samples were taken from
-Mat DrawClothSampleRegion(const Mat& training_image) {
+// for the report: sampled areas shown normally, excluded areas darkened
+Mat DrawClothSampleRegion(const Mat& training_image, const Mat& sample_mask) {
 	Mat display = training_image.clone();
-	rectangle(display, CLOTH_SAMPLE_REGION, Scalar(255, 0, 255), 3);
+	Mat darkened = training_image * 0.3;
+	darkened.copyTo(display, sample_mask == 0);
 	return display;
 }
 
@@ -160,9 +196,10 @@ void MyApplication() {
 	if (training_image.empty())
 		return;
 	Mat training_smoothed = SmoothImage(RectifyTable(training_image, perspective_matrix));
-	MatND cloth_histogram = BuildClothModel(training_smoothed);
+	Mat sample_mask = MakeClothSampleMask();
+	MatND cloth_histogram = BuildClothModel(training_smoothed, sample_mask);
 
-	Mat sample_display = DrawClothSampleRegion(training_smoothed);
+	Mat sample_display = DrawClothSampleRegion(training_smoothed, sample_mask);
 	Mat histogram_display = DrawClothHistogram(cloth_histogram);
 	SaveResult("Step3_ClothSample", TRAINING_IMAGE_INDEX, sample_display);
 	SaveResult("Step3_ClothHistogram", TRAINING_IMAGE_INDEX, histogram_display);
