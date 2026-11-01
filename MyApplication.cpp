@@ -202,6 +202,14 @@ Mat ThresholdClothProbability(const Mat& cloth_probability, double& otsu_thresho
 	return ball_mask;
 }
 
+// threshold at zero: a pixel is "not cloth" only if its (hue, saturation) has NO support
+// in the smoothed cloth model, i.e. that colour never appeared in (or next to) the cloth sample
+Mat ZeroSupportMask(const Mat& cloth_probability) {
+	Mat ball_mask;
+	threshold(cloth_probability, ball_mask, 0, 255, THRESH_BINARY_INV);   // > 0 -> 0 (cloth), 0 -> 255 (candidate ball)
+	return ball_mask;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -276,6 +284,7 @@ void MyApplication() {
 	namedWindow("Cloth probability", WINDOW_NORMAL);
 	namedWindow("Ball mask (white = not cloth)", WINDOW_NORMAL);
 	namedWindow("Probability histogram (log scale, red = Otsu threshold)", WINDOW_AUTOSIZE);
+	namedWindow("Otsu mask (comparison only)", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -298,15 +307,19 @@ void MyApplication() {
 		Mat cloth_probability = ComputeClothProbability(smoothed_image, cloth_histogram);
 		SaveResult("Step3_ClothProbability", image_no, cloth_probability);
 
-		// Step 4: threshold (Otsu) -> binary mask of candidate ball pixels
+		// Step 4: threshold -> binary mask of candidate ball pixels
+        // Otsu's mask is computed for comparison only; the zero-support mask is used
 		double otsu_threshold;
-		Mat ball_mask = ThresholdClothProbability(cloth_probability, otsu_threshold);
+		Mat otsu_mask = ThresholdClothProbability(cloth_probability, otsu_threshold);
+		Mat ball_mask = ZeroSupportMask(cloth_probability);
 		Mat probability_histogram = DrawProbabilityHistogram(cloth_probability, otsu_threshold);
 		cout << "   Otsu threshold = " << otsu_threshold << endl;
+		SaveResult("Step4_OtsuMask", image_no, otsu_mask);
 		SaveResult("Step4_Mask", image_no, ball_mask);
 		SaveResult("Step4_Histogram", image_no, probability_histogram);
 
 		imshow("Cloth probability", cloth_probability);
+		imshow("Otsu mask (comparison only)", otsu_mask);
 		imshow("Ball mask (white = not cloth)", ball_mask);
 		imshow("Probability histogram (log scale, red = Otsu threshold)", probability_histogram);
 		waitKey(0);
