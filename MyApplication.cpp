@@ -36,6 +36,7 @@ const Point2f TABLE_CORNERS[4] = {
 };
 
 const int MEDIAN_FILTER_SIZE = 5;
+const int MORPHOLOGY_ELEMENT_SIZE = 5;
 
 // Cloth sample = the whole table in the TRAINING image (AllBalls.jpeg), except:
 //  - a border along the cushions, where the cushions and pockets are
@@ -210,6 +211,27 @@ Mat ZeroSupportMask(const Mat& cloth_probability) {
 	return ball_mask;
 }
 
+// clean the binary mask with morphology:
+// opening (erosion then dilation) removes small specks and thin bridges,
+// then closing (dilation then erosion) fills small holes and gaps inside the balls
+Mat CleanMask(const Mat& ball_mask) {
+	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
+	Mat opened_mask, cleaned_mask;
+	morphologyEx(ball_mask, opened_mask, MORPH_OPEN, element);
+	morphologyEx(opened_mask, cleaned_mask, MORPH_CLOSE, element);
+	return cleaned_mask;
+}
+
+// for the report: what the cleaning changed
+// white = kept, red = removed by cleaning, green = added by cleaning
+Mat DrawMorphologyChanges(const Mat& before, const Mat& after) {
+	Mat display(before.size(), CV_8UC3, Scalar(0, 0, 0));
+	display.setTo(Scalar(255, 255, 255), before & after);
+	display.setTo(Scalar(0, 0, 255), before & ~after);
+	display.setTo(Scalar(0, 255, 0), ~before & after);
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -281,10 +303,9 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Cloth probability", WINDOW_NORMAL);
-	namedWindow("Ball mask (white = not cloth)", WINDOW_NORMAL);
-	namedWindow("Probability histogram (log scale, red = Otsu threshold)", WINDOW_AUTOSIZE);
-	namedWindow("Otsu mask (comparison only)", WINDOW_NORMAL);
+	namedWindow("Ball mask (Step 4)", WINDOW_NORMAL);
+	namedWindow("Cleaned mask (Step 5)", WINDOW_NORMAL);
+	namedWindow("Morphology changes (red = removed, green = added)", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -308,20 +329,24 @@ void MyApplication() {
 		SaveResult("Step3_ClothProbability", image_no, cloth_probability);
 
 		// Step 4: threshold -> binary mask of candidate ball pixels
-        // Otsu's mask is computed for comparison only; the zero-support mask is used
+		// Otsu's mask is computed for comparison only; the zero-support mask is used
 		double otsu_threshold;
 		Mat otsu_mask = ThresholdClothProbability(cloth_probability, otsu_threshold);
 		Mat ball_mask = ZeroSupportMask(cloth_probability);
-		Mat probability_histogram = DrawProbabilityHistogram(cloth_probability, otsu_threshold);
 		cout << "   Otsu threshold = " << otsu_threshold << endl;
 		SaveResult("Step4_OtsuMask", image_no, otsu_mask);
 		SaveResult("Step4_Mask", image_no, ball_mask);
-		SaveResult("Step4_Histogram", image_no, probability_histogram);
+		SaveResult("Step4_Histogram", image_no, DrawProbabilityHistogram(cloth_probability, otsu_threshold));
 
-		imshow("Cloth probability", cloth_probability);
-		imshow("Otsu mask (comparison only)", otsu_mask);
-		imshow("Ball mask (white = not cloth)", ball_mask);
-		imshow("Probability histogram (log scale, red = Otsu threshold)", probability_histogram);
+		// Step 5: clean the mask (opening then closing)
+		Mat cleaned_mask = CleanMask(ball_mask);
+		Mat morphology_changes = DrawMorphologyChanges(ball_mask, cleaned_mask);
+		SaveResult("Step5_CleanedMask", image_no, cleaned_mask);
+		SaveResult("Step5_Changes", image_no, morphology_changes);
+
+		imshow("Ball mask (Step 4)", ball_mask);
+		imshow("Cleaned mask (Step 5)", cleaned_mask);
+		imshow("Morphology changes (red = removed, green = added)", morphology_changes);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
