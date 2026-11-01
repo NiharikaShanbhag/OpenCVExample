@@ -125,6 +125,29 @@ Mat MakeClothSampleMask() {
 	return mask;
 }
 
+// smooth the 2D histogram: each bin becomes the average of itself and its 8 neighbours
+// (2D version of the 1D histogram smoothing from the lectures).
+// Hue is circular, so it wraps around at the ends; saturation does not wrap.
+MatND SmoothHistogram(const MatND& histogram) {
+	MatND smoothed = histogram.clone();
+	for (int hue_bin = 0; hue_bin < HUE_BINS; hue_bin++)
+		for (int saturation_bin = 0; saturation_bin < SATURATION_BINS; saturation_bin++) {
+			float sum = 0.0f;
+			int count = 0;
+			for (int hue_offset = -1; hue_offset <= 1; hue_offset++)
+				for (int saturation_offset = -1; saturation_offset <= 1; saturation_offset++) {
+					int h = (hue_bin + hue_offset + HUE_BINS) % HUE_BINS;    // wrap around (circular hue)
+					int s = saturation_bin + saturation_offset;
+					if (s < 0 || s >= SATURATION_BINS)                       // no wrap for saturation
+						continue;
+					sum += histogram.at<float>(h, s);
+					count++;
+				}
+			smoothed.at<float>(hue_bin, saturation_bin) = sum / count;
+		}
+	return smoothed;
+}
+
 // build the cloth model: 2D hue-saturation histogram of the cloth sample from the training image
 MatND BuildClothModel(const Mat& smoothed_training_image, const Mat& sample_mask) {
 	Mat hls_image;
@@ -132,6 +155,7 @@ MatND BuildClothModel(const Mat& smoothed_training_image, const Mat& sample_mask
 
 	MatND cloth_histogram;
 	calcHist(&hls_image, 1, HS_CHANNELS, sample_mask, cloth_histogram, 2, HS_BINS, HS_RANGES);
+	cloth_histogram = SmoothHistogram(cloth_histogram);
 
 	// normalise so the most common cloth colour = 255 (i.e. 1.0)
 	normalize(cloth_histogram, cloth_histogram, 0.0, 255.0, NORM_MINMAX);
