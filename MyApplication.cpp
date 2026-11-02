@@ -1,6 +1,7 @@
 ﻿#include "Utilities.h"
 #include <string>
 #include <cmath>
+#include <algorithm>
 
 const int TABLE_ROWS = 683;
 const int TABLE_COLS = 1434;
@@ -52,6 +53,9 @@ const Point ALLBALLS_BALL_POSITIONS[NUMBER_OF_BALLS] = {
 	Point(1307, 253), Point(901, 329),  Point(961, 330),  Point(1013, 335),
 	Point(1067, 336), Point(1130, 334), Point(1187, 345), Point(1245, 342)
 };
+// Region classification (Step 7)
+const double MIN_AREA_FRACTION = 0.5;                  // a ball must be at least half visible to be found
+const double MIN_REGION_WIDTH = BALL_DIAMETER / 2.0;   // even half a ball is at least a ball radius wide (rejects thin slivers)
 
 
 const int HUE_BINS = 36;             
@@ -275,6 +279,31 @@ Mat DrawRegions(const Mat& table_image, const vector<vector<Point>>& regions) {
 	return display;
 }
 
+// learn the area of ONE ball's region from the TRAINING image:
+// regions that contain exactly one ground-truth ball position are single balls;
+// the median of their areas is used (robust to one unusual region)
+double LearnSingleBallArea(const vector<vector<Point>>& training_regions) {
+	vector<double> single_areas;
+	for (int region = 0; region < (int)training_regions.size(); region++) {
+		int balls_inside = 0;
+		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+			if (pointPolygonTest(training_regions[region], ALLBALLS_BALL_POSITIONS[ball], false) >= 0)
+				balls_inside++;
+		if (balls_inside == 1)
+			single_areas.push_back(contourArea(training_regions[region]));
+	}
+	if (single_areas.empty())
+		return 0.0;
+
+	sort(single_areas.begin(), single_areas.end());
+	double median_area = single_areas[single_areas.size() / 2];
+	cout << "Single-ball regions in training image: " << single_areas.size() << ", areas:";
+	for (int i = 0; i < (int)single_areas.size(); i++)
+		cout << " " << (int)single_areas[i];
+	cout << endl << "Learned single ball area (median) = " << median_area << endl << endl;
+	return median_area;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -341,6 +370,14 @@ void MyApplication() {
 	Mat training_cleaned = CleanMask(ZeroSupportMask(ComputeClothProbability(training_smoothed, cloth_histogram)));
 	Mat structure_mask = MakeTableStructureMask(training_cleaned);
 	SaveResult("Step6_TableStructure", TRAINING_IMAGE_INDEX, structure_mask);
+
+	// single ball area: run the training image through Step 6, then look at regions containing exactly one ball
+	Mat training_object_mask = RemoveTableStructure(training_cleaned, structure_mask);
+	double single_ball_area = LearnSingleBallArea(FindRegions(training_object_mask));
+	if (single_ball_area <= 0.0) {
+		cout << "Could not learn the single ball area from the training image" << endl;
+		return;
+	}
 
 	namedWindow("Cloth sample region", WINDOW_NORMAL);
 	namedWindow("Cloth histogram (rows = hue, cols = saturation)", WINDOW_AUTOSIZE);
