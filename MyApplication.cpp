@@ -104,14 +104,9 @@ Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
 	return comparison;
 }
 
-// which pixels of the training image are used as cloth samples (255 = sample, 0 = excluded)
-Mat MakeClothSampleMask() {
-	// start with the table interior, away from the cushions and pockets
-	Mat mask(TABLE_ROWS, TABLE_COLS, CV_8UC1, Scalar(0));
-	rectangle(mask, Rect(CUSHION_MARGIN, CUSHION_MARGIN,
-		TABLE_COLS - 2 * CUSHION_MARGIN, TABLE_ROWS - 2 * CUSHION_MARGIN), Scalar(255), FILLED);
-
-	// find the box containing all the balls (from the training ground truth)
+// box around all the balls in the training image (from the AllBalls ground truth),
+// expanded by 2 ball diameters to cover the stretched balls
+Rect GetTrainingBallArea() {
 	int min_col = TABLE_COLS, max_col = 0, min_row = TABLE_ROWS, max_row = 0;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++) {
 		min_col = min(min_col, ALLBALLS_BALL_POSITIONS[ball].x);
@@ -119,11 +114,18 @@ Mat MakeClothSampleMask() {
 		min_row = min(min_row, ALLBALLS_BALL_POSITIONS[ball].y);
 		max_row = max(max_row, ALLBALLS_BALL_POSITIONS[ball].y);
 	}
-
-	// expand it by 2 ball diameters and remove it from the sample
 	int expand = 2 * BALL_DIAMETER;
-	rectangle(mask, Point(min_col - expand, min_row - expand),
-		Point(max_col + expand, max_row + expand), Scalar(0), FILLED);
+	return Rect(Point(min_col - expand, min_row - expand), Point(max_col + expand, max_row + expand));
+}
+
+// which pixels of the training image are used as cloth samples (255 = sample, 0 = excluded)
+Mat MakeClothSampleMask() {
+	// start with the table interior, away from the cushions and pockets
+	Mat mask(TABLE_ROWS, TABLE_COLS, CV_8UC1, Scalar(0));
+	rectangle(mask, Rect(CUSHION_MARGIN, CUSHION_MARGIN,
+		TABLE_COLS - 2 * CUSHION_MARGIN, TABLE_ROWS - 2 * CUSHION_MARGIN), Scalar(255), FILLED);
+	// remove the area containing the balls
+	rectangle(mask, GetTrainingBallArea(), Scalar(0), FILLED);
 	return mask;
 }
 
@@ -232,6 +234,26 @@ Mat DrawMorphologyChanges(const Mat& before, const Mat& after) {
 	return display;
 }
 
+// table structure (cushions, pockets, marks on the cloth) = everything that is "not cloth" in the
+// cleaned mask of the TRAINING image, apart from its balls. The camera is stationary, so these are
+// in the same place in every image. Dilated by the 5x5 element to allow for small lighting differences.
+Mat MakeTableStructureMask(const Mat& training_cleaned_mask) {
+	Mat structure_mask = training_cleaned_mask.clone();
+	rectangle(structure_mask, GetTrainingBallArea(), Scalar(0), FILLED);
+	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
+	dilate(structure_mask, structure_mask, element);
+	return structure_mask;
+}
+
+// object mask = cleaned mask AND NOT table structure,
+// then an opening (same 5x5 element) removes any thin leftover slivers of the cushion band
+Mat RemoveTableStructure(const Mat& cleaned_mask, const Mat& structure_mask) {
+	Mat object_mask = cleaned_mask & ~structure_mask;
+	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
+	morphologyEx(object_mask, object_mask, MORPH_OPEN, element);
+	return object_mask;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -294,10 +316,17 @@ void MyApplication() {
 	SaveResult("Step3_ClothSample", TRAINING_IMAGE_INDEX, sample_display);
 	SaveResult("Step3_ClothHistogram", TRAINING_IMAGE_INDEX, histogram_display);
 
+	// table structure: run the training image through Steps 3-5, then remove its balls
+	Mat training_cleaned = CleanMask(ZeroSupportMask(ComputeClothProbability(training_smoothed, cloth_histogram)));
+	Mat structure_mask = MakeTableStructureMask(training_cleaned);
+	SaveResult("Step6_TableStructure", TRAINING_IMAGE_INDEX, structure_mask);
+
 	namedWindow("Cloth sample region", WINDOW_NORMAL);
 	namedWindow("Cloth histogram (rows = hue, cols = saturation)", WINDOW_AUTOSIZE);
+	namedWindow("Table structure mask", WINDOW_NORMAL);
 	imshow("Cloth sample region", sample_display);
 	imshow("Cloth histogram (rows = hue, cols = saturation)", histogram_display);
+	imshow("Table structure mask", structure_mask);
 	cout << "Cloth model built - press any key to process the images" << endl;
 	waitKey(0);
 	cv::destroyAllWindows();
@@ -343,9 +372,12 @@ void MyApplication() {
 		Mat morphology_changes = DrawMorphologyChanges(ball_mask, cleaned_mask);
 		SaveResult("Step5_CleanedMask", image_no, cleaned_mask);
 		SaveResult("Step5_Changes", image_no, morphology_changes);
+		// Step 6A: remove the table structure (cushions, pockets, marks)
+		Mat object_mask = RemoveTableStructure(cleaned_mask, structure_mask);
+		SaveResult("Step6_ObjectMask", image_no, object_mask);
 
-		imshow("Ball mask (Step 4)", ball_mask);
-		imshow("Cleaned mask (Step 5)", cleaned_mask);
+		imshow("Ball mask (Step 4)", cleaned_mask);
+		imshow("Cleaned mask (Step 5)", object_mask);
 		imshow("Morphology changes (red = removed, green = added)", morphology_changes);
 		waitKey(0);
 	}
