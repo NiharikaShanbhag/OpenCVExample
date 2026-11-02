@@ -254,6 +254,27 @@ Mat RemoveTableStructure(const Mat& cleaned_mask, const Mat& structure_mask) {
 	return object_mask;
 }
 
+// connected components: the outer boundary (contour) of every separate white region.
+// OpenCV traces object boundaries with 8-adjacency (background 4-adjacency, as in the lectures).
+// Only the outermost contours are kept (holes inside regions are not needed).
+vector<vector<Point>> FindRegions(const Mat& object_mask) {
+	vector<vector<Point>> contours;
+	vector<Vec4i> hierarchy;
+	findContours(object_mask, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE);
+	return contours;
+}
+
+// for the report: each region filled with a random colour (fixed seed, so colours repeat each run)
+Mat DrawRegions(const Mat& table_image, const vector<vector<Point>>& regions) {
+	Mat display = Mat::zeros(table_image.size(), CV_8UC3);
+	RNG random_colours(12345);
+	for (int region = 0; region < (int)regions.size(); region++) {
+		Scalar colour(random_colours.uniform(60, 256), random_colours.uniform(60, 256), random_colours.uniform(60, 256));
+		drawContours(display, regions, region, colour, FILLED, 8);
+	}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -332,9 +353,9 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Ball mask (Step 4)", WINDOW_NORMAL);
 	namedWindow("Cleaned mask (Step 5)", WINDOW_NORMAL);
-	namedWindow("Morphology changes (red = removed, green = added)", WINDOW_NORMAL);
+	namedWindow("Object mask (Step 6A)", WINDOW_NORMAL);
+	namedWindow("Regions (Step 6B)", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -372,13 +393,20 @@ void MyApplication() {
 		Mat morphology_changes = DrawMorphologyChanges(ball_mask, cleaned_mask);
 		SaveResult("Step5_CleanedMask", image_no, cleaned_mask);
 		SaveResult("Step5_Changes", image_no, morphology_changes);
+
 		// Step 6A: remove the table structure (cushions, pockets, marks)
 		Mat object_mask = RemoveTableStructure(cleaned_mask, structure_mask);
 		SaveResult("Step6_ObjectMask", image_no, object_mask);
 
-		imshow("Ball mask (Step 4)", cleaned_mask);
-		imshow("Cleaned mask (Step 5)", object_mask);
-		imshow("Morphology changes (red = removed, green = added)", morphology_changes);
+		// Step 6B: connected components -> list of regions
+		vector<vector<Point>> regions = FindRegions(object_mask);
+		Mat regions_display = DrawRegions(table_image, regions);
+		cout << "   regions found = " << regions.size() << endl;
+		SaveResult("Step6_Regions", image_no, regions_display);
+
+		imshow("Cleaned mask (Step 5)", cleaned_mask);
+		imshow("Object mask (Step 6A)", object_mask);
+		imshow("Regions (Step 6B)", regions_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
