@@ -53,10 +53,14 @@ const Point ALLBALLS_BALL_POSITIONS[NUMBER_OF_BALLS] = {
 	Point(1307, 253), Point(901, 329),  Point(961, 330),  Point(1013, 335),
 	Point(1067, 336), Point(1130, 334), Point(1187, 345), Point(1245, 342)
 };
+
 // Region classification (Step 7)
 const double MIN_AREA_FRACTION = 0.5;                  // a ball must be at least half visible to be found
 const double MIN_REGION_WIDTH = BALL_DIAMETER / 2.0;   // even half a ball is at least a ball radius wide (rejects thin slivers)
 
+// Splitting (Step 8): erosion with a 3x3 element removes 1mm from each edge, so a piece that survives
+// d erosions is about 2d mm thick. A ball core must be at least MIN_REGION_WIDTH thick (as in Step 7).
+const int MIN_CORE_DEPTH = (int)(MIN_REGION_WIDTH / 2.0);
 
 const int HUE_BINS = 36;             
 const int SATURATION_BINS = 32;      
@@ -333,6 +337,75 @@ Mat DrawRegionClassification(const Mat& table_image, const vector<vector<Point>>
 	return display;
 }
 
+// a ball "core" found by repeated erosion: its centre, and how many erosions it survived
+struct BallCore {
+	Point2f centre;
+	int depth;
+};
+
+// split a merged region by repeated erosion (3x3 = 1mm per erosion).
+// Whenever a piece is about to disappear completely, it is recorded as a core:
+// its centre (from moments) and its depth (number of erosions survived).
+// erosion_depth accumulates, for every pixel, how many erosions it survived (for the report).
+vector<BallCore> FindBallCores(const vector<Point>& region, const Size& image_size, Mat& erosion_depth) {
+	Mat current = Mat::zeros(image_size, CV_8UC1);
+	vector<vector<Point>> region_list(1, region);
+	drawContours(current, region_list, 0, Scalar(255), FILLED, 8);
+
+	Mat element(3, 3, CV_8U, Scalar(1));
+	vector<BallCore> cores;
+	for (int depth = 0; countNonZero(current) > 0; depth++) {
+		add(erosion_depth, Scalar(1), erosion_depth, current);   // every surviving pixel survived one more erosion
+
+		Mat eroded;
+		erode(current, eroded, element);
+
+		// any piece with nothing left after this erosion is recorded as a core
+		vector<vector<Point>> pieces;
+		findContours(current, pieces, RETR_EXTERNAL, CHAIN_APPROX_NONE);
+		for (int piece = 0; piece < (int)pieces.size(); piece++) {
+			Mat piece_mask = Mat::zeros(image_size, CV_8UC1);
+			drawContours(piece_mask, pieces, piece, Scalar(255), FILLED, 8);
+			if (countNonZero(piece_mask & eroded) == 0) {
+				Moments piece_moments = moments(piece_mask, true);
+				BallCore core;
+				core.centre = Point2f((float)(piece_moments.m10 / piece_moments.m00),
+					(float)(piece_moments.m01 / piece_moments.m00));
+				core.depth = depth;
+				cores.push_back(core);
+			}
+		}
+		current = eroded;
+	}
+	return cores;
+}
+
+// keep only cores that are thick enough to be a ball, and suppress cores closer than one ball
+// diameter to a deeper core: two balls cannot overlap, so their centres are at least 43mm apart.
+// candidate_count returns how many cores there were before suppression (for the report).
+vector<BallCore> SplitMergedRegion(const vector<Point>& region, const Size& image_size, Mat& erosion_depth, int& candidate_count) {
+	vector<BallCore> all_cores = FindBallCores(region, image_size, erosion_depth);
+
+	// deepest (most ball-like) cores first
+	sort(all_cores.begin(), all_cores.end(),
+		[](const BallCore& a, const BallCore& b) { return a.depth > b.depth; });
+
+	vector<BallCore> ball_cores;
+	candidate_count = 0;
+	for (int core = 0; core < (int)all_cores.size(); core++) {
+		if (all_cores[core].depth < MIN_CORE_DEPTH)
+			continue;                                  // too thin to be a ball
+		candidate_count++;
+		bool too_close = false;
+		for (int kept = 0; kept < (int)ball_cores.size(); kept++)
+			if (norm(all_cores[core].centre - ball_cores[kept].centre) < BALL_DIAMETER)
+				too_close = true;                      // same ball as a deeper core
+		if (!too_close)
+			ball_cores.push_back(all_cores[core]);
+	}
+	return ball_cores;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -485,6 +558,20 @@ void MyApplication() {
 			<< ", rejected = " << rejected << ", estimated balls = " << estimated_balls << endl;
 		Mat classification_display = DrawRegionClassification(table_image, regions, ball_counts);
 		SaveResult("Step7_Classification", image_no, classification_display);
+
+		// Step 8: split merged groups into individual balls (repeated erosion)
+		vector<BallCore> split_balls;
+		Mat erosion_depth = Mat::zeros(table_image.size(), CV_8UC1);
+		for (int region = 0; region < (int)regions.size(); region++)
+			if (ball_counts[region] >= 2) {
+				int candidate_count;
+				vector<BallCore> cores = SplitMergedRegion(regions[region], table_image.size(), erosion_depth, candidate_count);
+				Rect box = boundingRect(regions[region]);
+				cout << "   merged group at (row " << box.y + box.height / 2 << ", col " << box.x + box.width / 2
+					<< "): estimated " << ball_counts[region] << " balls, " << candidate_count
+					<< " candidate cores, split into " << cores.size() << endl;
+				split_balls.insert(split_balls.end(), cores.begin(), cores.end());
+			}
 
 		imshow("Object mask (Step 6A)", object_mask);
 		imshow("Regions (Step 6B)", regions_display);
