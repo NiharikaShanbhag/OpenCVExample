@@ -304,6 +304,35 @@ double LearnSingleBallArea(const vector<vector<Point>>& training_regions) {
 	return median_area;
 }
 
+// classify a region using its features (area, minimum bounding rectangle width)
+// returns 0 = noise (rejected), 1 = single ball, 2+ = estimated number of merged balls
+int EstimateBallCount(const vector<Point>& region, double single_ball_area) {
+	double area = contourArea(region);
+	RotatedRect bounding_rectangle = minAreaRect(region);
+	double width = min(bounding_rectangle.size.width, bounding_rectangle.size.height);
+
+	if (area < MIN_AREA_FRACTION * single_ball_area || width < MIN_REGION_WIDTH)
+		return 0;
+	int ball_count = (int)round(area / single_ball_area);
+	return max(ball_count, 1);
+}
+
+// for the report: red = rejected, green = single ball, yellow = merged balls (labelled with the estimated count)
+Mat DrawRegionClassification(const Mat& table_image, const vector<vector<Point>>& regions, const vector<int>& ball_counts) {
+	Mat display = table_image * 0.5;
+	for (int region = 0; region < (int)regions.size(); region++) {
+		Scalar colour = (ball_counts[region] == 0) ? Scalar(0, 0, 255) :
+			(ball_counts[region] == 1) ? Scalar(0, 255, 0) : Scalar(0, 255, 255);
+		drawContours(display, regions, region, colour, FILLED, 8);
+		if (ball_counts[region] >= 2) {
+			Rect box = boundingRect(regions[region]);
+			putText(display, to_string(ball_counts[region]), Point(box.x, box.y - 5),
+				FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 255), 2);
+		}
+	}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -390,9 +419,9 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Cleaned mask (Step 5)", WINDOW_NORMAL);
 	namedWindow("Object mask (Step 6A)", WINDOW_NORMAL);
 	namedWindow("Regions (Step 6B)", WINDOW_NORMAL);
+	namedWindow("Classification (Step 7): red = rejected, green = single, yellow = merged", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -441,9 +470,25 @@ void MyApplication() {
 		cout << "   regions found = " << regions.size() << endl;
 		SaveResult("Step6_Regions", image_no, regions_display);
 
-		imshow("Cleaned mask (Step 5)", cleaned_mask);
+		// Step 7: classify each region as noise / single ball / merged balls
+		vector<int> ball_counts;
+		int singles = 0, groups = 0, rejected = 0, estimated_balls = 0;
+		for (int region = 0; region < (int)regions.size(); region++) {
+			int ball_count = EstimateBallCount(regions[region], single_ball_area);
+			ball_counts.push_back(ball_count);
+			if (ball_count == 0) rejected++;
+			else if (ball_count == 1) singles++;
+			else groups++;
+			estimated_balls += ball_count;
+		}
+		cout << "   single balls = " << singles << ", merged groups = " << groups
+			<< ", rejected = " << rejected << ", estimated balls = " << estimated_balls << endl;
+		Mat classification_display = DrawRegionClassification(table_image, regions, ball_counts);
+		SaveResult("Step7_Classification", image_no, classification_display);
+
 		imshow("Object mask (Step 6A)", object_mask);
 		imshow("Regions (Step 6B)", regions_display);
+		imshow("Classification (Step 7): red = rejected, green = single, yellow = merged", classification_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
