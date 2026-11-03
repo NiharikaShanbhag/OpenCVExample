@@ -502,6 +502,98 @@ Mat DrawGroundTruth(const Mat& table_image, int image_no) {
 	return display;
 }
 
+// result of evaluating one image's detections against its ground truth
+struct EvaluationResult {
+	int true_positives = 0, false_positives = 0, false_negatives = 0;
+	double total_error = 0.0, total_row_error = 0.0, total_col_error = 0.0, max_error = 0.0;
+	vector<pair<int, int>> matches;      // (ball, detection)
+	vector<bool> ball_matched;           // per ball
+	vector<bool> detection_matched;      // per detection
+};
+
+double Precision(int tp, int fp) { return (tp + fp > 0) ? (double)tp / (tp + fp) : 0.0; }
+double Recall(int tp, int fn) { return (tp + fn > 0) ? (double)tp / (tp + fn) : 0.0; }
+double F1(double precision, double recall) {
+	return (precision + recall > 0.0) ? 2.0 * precision * recall / (precision + recall) : 0.0;
+}
+
+// one-to-one matching of detections to true balls within match_distance (closest pairs first),
+// then TP / FP / FN and position errors for the matches
+EvaluationResult EvaluateDetections(const vector<Detection>& detections, int image_no, double match_distance) {
+	EvaluationResult result;
+	result.ball_matched.assign(NUMBER_OF_BALLS, false);
+	result.detection_matched.assign(detections.size(), false);
+
+	// every (ball, detection) pair within the matching distance
+	vector<pair<double, pair<int, int>>> candidate_pairs;
+	int balls_present = 0;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		if (BallPresent(image_no, ball)) {
+			balls_present++;
+			for (int detection = 0; detection < (int)detections.size(); detection++) {
+				double distance = norm(detections[detection].position - GroundTruthPosition(image_no, ball));
+				if (distance <= match_distance)
+					candidate_pairs.push_back(make_pair(distance, make_pair(ball, detection)));
+			}
+		}
+	sort(candidate_pairs.begin(), candidate_pairs.end());   // closest first
+
+	// accept a pair only if neither the ball nor the detection is already matched
+	for (int i = 0; i < (int)candidate_pairs.size(); i++) {
+		int ball = candidate_pairs[i].second.first;
+		int detection = candidate_pairs[i].second.second;
+		if (result.ball_matched[ball] || result.detection_matched[detection])
+			continue;
+		result.ball_matched[ball] = true;
+		result.detection_matched[detection] = true;
+		result.matches.push_back(make_pair(ball, detection));
+		result.true_positives++;
+
+		Point2f error = detections[detection].position - GroundTruthPosition(image_no, ball);
+		result.total_error += candidate_pairs[i].first;
+		result.total_row_error += error.y;      // + = detection is below the true position
+		result.total_col_error += error.x;      // + = detection is to the right of the true position
+		result.max_error = max(result.max_error, candidate_pairs[i].first);
+	}
+	result.false_positives = (int)detections.size() - result.true_positives;
+	result.false_negatives = balls_present - result.true_positives;
+	return result;
+}
+
+void PrintEvaluation(const EvaluationResult& result) {
+	double precision = Precision(result.true_positives, result.false_positives);
+	double recall = Recall(result.true_positives, result.false_negatives);
+	cout << fixed << setprecision(2)
+		<< "   TP = " << result.true_positives << ", FP = " << result.false_positives << ", FN = " << result.false_negatives
+		<< ", precision = " << precision << ", recall = " << recall << ", F1 = " << F1(precision, recall) << endl;
+	if (result.true_positives > 0)
+		cout << setprecision(1)
+		<< "   position error: mean = " << result.total_error / result.true_positives << " mm, max = " << result.max_error
+		<< " mm, mean row error = " << result.total_row_error / result.true_positives
+		<< " mm, mean column error = " << result.total_col_error / result.true_positives << " mm" << endl;
+}
+
+// for the report: green = match (circle at the true position, line to the detection),
+// red cross = false positive, yellow circle = missed ball (false negative)
+Mat DrawEvaluation(const Mat& table_image, const vector<Detection>& detections, int image_no, const EvaluationResult& result) {
+	Mat display = table_image.clone();
+	int radius = BALL_DIAMETER / 2;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		if (BallPresent(image_no, ball) && !result.ball_matched[ball])
+			circle(display, GroundTruthPosition(image_no, ball), radius, Scalar(0, 255, 255), 2);
+	for (int i = 0; i < (int)result.matches.size(); i++) {
+		Point2f truth = GroundTruthPosition(image_no, result.matches[i].first);
+		Point2f found = detections[result.matches[i].second].position;
+		circle(display, truth, radius, Scalar(0, 255, 0), 2);
+		line(display, truth, found, Scalar(0, 255, 0), 2);
+		circle(display, found, 3, Scalar(0, 255, 0), FILLED);
+	}
+	for (int detection = 0; detection < (int)detections.size(); detection++)
+		if (!result.detection_matched[detection])
+			drawMarker(display, detections[detection].position, Scalar(0, 0, 255), MARKER_TILTED_CROSS, 20, 3);
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -590,8 +682,8 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Detections (Step 9): green = single, blue = split from group", WINDOW_NORMAL);
 	namedWindow("Ground truth (Step 10)", WINDOW_NORMAL);
+	namedWindow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -699,8 +791,14 @@ void MyApplication() {
 		Mat ground_truth_display = DrawGroundTruth(table_image, image_no);
 		SaveResult("Step10_GroundTruth", image_no, ground_truth_display);
 
-		imshow("Detections (Step 9): green = single, blue = split from group", detections_display);
+		// Step 10: evaluation against the ground truth
+		EvaluationResult evaluation = EvaluateDetections(detections, image_no, MATCH_DISTANCE);
+		PrintEvaluation(evaluation);
+		Mat evaluation_display = DrawEvaluation(table_image, detections, image_no, evaluation);
+		SaveResult("Step10_Evaluation", image_no, evaluation_display);
+
 		imshow("Ground truth (Step 10)", ground_truth_display);
+		imshow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", evaluation_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
