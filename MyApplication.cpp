@@ -594,6 +594,30 @@ Mat DrawEvaluation(const Mat& table_image, const vector<Detection>& detections, 
 	return display;
 }
 
+// overall results on the TEST images only (Table1-6): TP, FP, FN summed over the images first.
+// AllBalls is the training image, so it is not included.
+void PrintOverallResults(const vector<vector<Detection>>& all_detections, double match_distance) {
+	int tp = 0, fp = 0, fn = 0;
+	double total_error = 0.0, total_row_error = 0.0, total_col_error = 0.0;
+	for (int image_no = 1; image_no < NUMBER_OF_IMAGES; image_no++) {
+		EvaluationResult result = EvaluateDetections(all_detections[image_no], image_no, match_distance);
+		tp += result.true_positives;
+		fp += result.false_positives;
+		fn += result.false_negatives;
+		total_error += result.total_error;
+		total_row_error += result.total_row_error;
+		total_col_error += result.total_col_error;
+	}
+	double precision = Precision(tp, fp), recall = Recall(tp, fn);
+	cout << fixed << setprecision(1) << "   match distance " << match_distance << " mm: "
+		<< setprecision(2) << "TP = " << tp << ", FP = " << fp << ", FN = " << fn
+		<< ", precision = " << precision << ", recall = " << recall << ", F1 = " << F1(precision, recall);
+	if (tp > 0)
+		cout << setprecision(1) << ", mean error = " << total_error / tp << " mm (row " << total_row_error / tp
+		<< ", col " << total_col_error / tp << ")";
+	cout << endl;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -684,6 +708,8 @@ void MyApplication() {
 	// ---- Process every image ----
 	namedWindow("Ground truth (Step 10)", WINDOW_NORMAL);
 	namedWindow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", WINDOW_NORMAL);
+
+	vector<vector<Detection>> all_detections(NUMBER_OF_IMAGES);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -797,9 +823,21 @@ void MyApplication() {
 		Mat evaluation_display = DrawEvaluation(table_image, detections, image_no, evaluation);
 		SaveResult("Step10_Evaluation", image_no, evaluation_display);
 
+		all_detections[image_no] = detections;
+
 		imshow("Ground truth (Step 10)", ground_truth_display);
 		imshow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", evaluation_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
+
+	// ---- Overall results on the test images (Table1-6) ----
+	cout << endl << "OVERALL RESULTS (test images Table1-6, training image excluded):" << endl;
+	PrintOverallResults(all_detections, MATCH_DISTANCE);
+
+	// sensitivity to the matching distance (evaluation only - nothing in the method is changed)
+	cout << endl << "Sensitivity to the matching distance:" << endl;
+	const double distances[] = { 10.0, BALL_DIAMETER / 2.0, 32.0, (double)BALL_DIAMETER };
+	for (int i = 0; i < 4; i++)
+		PrintOverallResults(all_detections, distances[i]);
 }
