@@ -2,6 +2,7 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <iomanip>
 
 const int TABLE_ROWS = 683;
 const int TABLE_COLS = 1434;
@@ -61,6 +62,41 @@ const double MIN_REGION_WIDTH = BALL_DIAMETER / 2.0;   // even half a ball is at
 // Splitting (Step 8): erosion with a 3x3 element removes 1mm from each edge, so a piece that survives
 // d erosions is about 2d mm thick. A ball core must be at least MIN_REGION_WIDTH thick (as in Step 7).
 const int MIN_CORE_DEPTH = (int)(MIN_REGION_WIDTH / 2.0);
+
+// =====================================================================
+//  Ground truth (Step 10), from the Excel file provided with the brief.
+//  [image][ball] = {row, column}; ball 0 = white, 1-15 = numbered; {-1,-1} = not on the table.
+//  Corrections (only entries that are provably wrong, documented in the report):
+//   - Table1 balls 2, 4, 11: row > 683 is impossible (table has 683 rows) -> row and column swapped
+//   - Table1 ball 3: identical to ball 7 in the Excel file -> value from the table in the brief
+//   - AllBalls balls 11-15 are labelled differently in the Excel file and the brief (positions unaffected)
+// =====================================================================
+const int GROUND_TRUTH[NUMBER_OF_IMAGES][NUMBER_OF_BALLS][2] = {
+	// AllBalls.jpeg (training image)
+	{ {293,797}, {253,908}, {250,959}, {255,1013}, {256,1072}, {254,1132}, {262,1184}, {256,1244},
+	  {253,1307}, {329,901}, {330,961}, {334,1130}, {335,1013}, {336,1067}, {342,1245}, {345,1187} },
+	// Table1.jpeg
+	{ {288,29}, {309,1092}, {429,1212}, {383,1131}, {335,1050}, {285,1211}, {261,1170}, {352,1173},
+	  {331,1132}, {240,1210}, {310,1170}, {407,1169}, {281,1135}, {374,1212}, {360,1091}, {331,1213} },
+	// Table2.jpeg
+	{ {507,1169}, {282,1103}, {620,1224}, {391,1121}, {310,1305}, {315,1046}, {202,621}, {361,1173},
+	  {331,1132}, {177,725}, {185,1269}, {665,798}, {296,438}, {53,1235}, {362,1090}, {399,1205} },
+	// Table3.jpeg
+	{ {434,29}, {23,908}, {616,1224}, {447,1199}, {336,29}, {305,1406}, {210,621}, {260,1294},
+	  {226,1252}, {177,725}, {171,1270}, {665,798}, {249,351}, {53,1233}, {169,901}, {399,1201} },
+	// Table4.jpeg
+	{ {88,1392}, {23,908}, {546,1407}, {444,1204}, {-1,-1}, {305,1406}, {210,621}, {260,1294},
+	  {226,1252}, {181,724}, {171,1270}, {665,798}, {249,351}, {58,1231}, {169,901}, {399,1201} },
+	// Table5.jpeg
+	{ {608,26}, {535,23}, {546,1407}, {444,1204}, {-1,-1}, {305,1406}, {131,25}, {260,1294},
+	  {226,1252}, {538,72}, {171,1270}, {665,798}, {249,351}, {-1,-1}, {169,901}, {399,1201} },
+	// Table6.jpeg
+	{ {629,947}, {535,23}, {477,1364}, {444,1204}, {-1,-1}, {305,1406}, {131,25}, {260,1294},
+	  {226,1252}, {538,72}, {171,1270}, {-1,-1}, {249,351}, {-1,-1}, {169,901}, {399,1201} }
+};
+
+// a detection is correct if it lies on the true ball, i.e. within one ball radius of its true position
+const double MATCH_DISTANCE = BALL_DIAMETER / 2.0;
 
 const int HUE_BINS = 36;             
 const int SATURATION_BINS = 32;      
@@ -431,6 +467,41 @@ Mat DrawDetections(const Mat& table_image, const vector<Detection>& detections) 
 	return display;
 }
 
+bool BallPresent(int image_no, int ball) {
+	return GROUND_TRUTH[image_no][ball][0] >= 0;
+}
+
+// true position as (x, y) = (column, row)
+Point2f GroundTruthPosition(int image_no, int ball) {
+	return Point2f((float)GROUND_TRUTH[image_no][ball][1], (float)GROUND_TRUTH[image_no][ball][0]);
+}
+
+string BallName(int ball) {
+	return (ball == 0) ? "W" : to_string(ball);
+}
+
+// automatic sanity check: warn about any ground-truth position outside the table
+void CheckGroundTruth() {
+	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
+		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+			if (BallPresent(image_no, ball) &&
+				(GROUND_TRUTH[image_no][ball][0] >= TABLE_ROWS || GROUND_TRUTH[image_no][ball][1] >= TABLE_COLS))
+				cout << "WARNING: ground truth for " << POOL_FILES[image_no] << " ball " << BallName(ball)
+				<< " is outside the table" << endl;
+}
+
+// for checking the ground truth: magenta circle and label at every true ball position
+Mat DrawGroundTruth(const Mat& table_image, int image_no) {
+	Mat display = table_image.clone();
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		if (BallPresent(image_no, ball)) {
+			Point2f position = GroundTruthPosition(image_no, ball);
+			circle(display, position, BALL_DIAMETER / 2, Scalar(255, 0, 255), 2);
+			putText(display, BallName(ball), position + Point2f(-8, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 2);
+		}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -480,6 +551,8 @@ void MyApplication() {
 	Mat perspective_matrix = getPerspectiveTransform(IMAGE_CORNERS, TABLE_CORNERS);
 	cout << "Perspective transformation matrix:" << endl << perspective_matrix << endl << endl;
 
+	CheckGroundTruth();
+
 	// ---- Training: build the cloth colour model from AllBalls.jpeg ONLY ----
 	Mat training_image = LoadImage(TRAINING_IMAGE_INDEX);
 	if (training_image.empty())
@@ -517,8 +590,8 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Classification (Step 7): red = rejected, green = single, yellow = merged", WINDOW_NORMAL);
 	namedWindow("Detections (Step 9): green = single, blue = split from group", WINDOW_NORMAL);
+	namedWindow("Ground truth (Step 10)", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -622,8 +695,12 @@ void MyApplication() {
 		SaveResult("Step8_ErosionDepth", image_no, erosion_depth * 10);
 		SaveResult("Step9_Detections", image_no, detections_display);
 
-		imshow("Classification (Step 7): red = rejected, green = single, yellow = merged", classification_display);
+		// Step 10: ground truth (drawn first, to check it visually)
+		Mat ground_truth_display = DrawGroundTruth(table_image, image_no);
+		SaveResult("Step10_GroundTruth", image_no, ground_truth_display);
+
 		imshow("Detections (Step 9): green = single, blue = split from group", detections_display);
+		imshow("Ground truth (Step 10)", ground_truth_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
