@@ -406,6 +406,31 @@ vector<BallCore> SplitMergedRegion(const vector<Point>& region, const Size& imag
 	return ball_cores;
 }
 
+// a detected ball: its position in table coordinates (x = column, y = row, in mm)
+struct Detection {
+	Point2f position;
+	bool from_split;    // true if it was found by splitting a merged group (Step 8)
+};
+
+// position of a single-ball region = its centroid from moments: (M10/M00, M01/M00)
+Point2f RegionCentroid(const vector<Point>& region) {
+	Moments region_moments = moments(region);
+	return Point2f((float)(region_moments.m10 / region_moments.m00),
+		(float)(region_moments.m01 / region_moments.m00));
+}
+
+// for the report: a ball-sized circle at every detection
+// green = single-ball region, blue = split out of a merged group
+Mat DrawDetections(const Mat& table_image, const vector<Detection>& detections) {
+	Mat display = table_image.clone();
+	for (int i = 0; i < (int)detections.size(); i++) {
+		Scalar colour = detections[i].from_split ? Scalar(255, 0, 0) : Scalar(0, 255, 0);
+		circle(display, detections[i].position, BALL_DIAMETER / 2, colour, 2);
+		circle(display, detections[i].position, 3, colour, FILLED);
+	}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -492,9 +517,8 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Object mask (Step 6A)", WINDOW_NORMAL);
-	namedWindow("Regions (Step 6B)", WINDOW_NORMAL);
 	namedWindow("Classification (Step 7): red = rejected, green = single, yellow = merged", WINDOW_NORMAL);
+	namedWindow("Detections (Step 9): green = single, blue = split from group", WINDOW_NORMAL);
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -573,9 +597,33 @@ void MyApplication() {
 				split_balls.insert(split_balls.end(), cores.begin(), cores.end());
 			}
 
-		imshow("Object mask (Step 6A)", object_mask);
-		imshow("Regions (Step 6B)", regions_display);
+		// Step 9: ball positions in table coordinates (mm)
+		vector<Detection> detections;
+		for (int region = 0; region < (int)regions.size(); region++)
+			if (ball_counts[region] == 1) {
+				Detection detection;
+				detection.position = RegionCentroid(regions[region]);
+				detection.from_split = false;
+				detections.push_back(detection);
+			}
+		for (int core = 0; core < (int)split_balls.size(); core++) {
+			Detection detection;
+			detection.position = split_balls[core].centre;
+			detection.from_split = true;
+			detections.push_back(detection);
+		}
+
+		cout << "   balls detected = " << detections.size() << ", positions (row,col):";
+		for (int i = 0; i < (int)detections.size(); i++)
+			cout << " (" << (int)round(detections[i].position.y) << "," << (int)round(detections[i].position.x) << ")";
+		cout << endl;
+
+		Mat detections_display = DrawDetections(table_image, detections);
+		SaveResult("Step8_ErosionDepth", image_no, erosion_depth * 10);
+		SaveResult("Step9_Detections", image_no, detections_display);
+
 		imshow("Classification (Step 7): red = rejected, green = single, yellow = merged", classification_display);
+		imshow("Detections (Step 9): green = single, blue = split from group", detections_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
