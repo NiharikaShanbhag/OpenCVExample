@@ -100,6 +100,10 @@ const int GROUND_TRUTH[NUMBER_OF_IMAGES][NUMBER_OF_BALLS][2] = {
 // a detection is correct if it lies on the true ball, i.e. within one ball radius of its true position
 const double MATCH_DISTANCE = BALL_DIAMETER / 2.0;
 
+// Part 2: a ball's pixels reach up to about one ball diameter from its position in the rectified image
+// (balls are stretched: the learned single-ball area is about 1.9 times a flat 43mm circle)
+const int SAMPLE_RADIUS = BALL_DIAMETER;
+
 const int HUE_BINS = 36;             
 const int SATURATION_BINS = 32;      
 const int HS_CHANNELS[] = { 0, 2 };
@@ -623,6 +627,65 @@ void PrintOverallResults(const vector<vector<Detection>>& all_detections, double
 	cout << endl;
 }
 
+// Part 2 Step 2: the pixels used to describe each ball.
+// A pixel belongs to a ball's sample if it is
+//   1. in the object mask (not cloth, not table structure),
+//   2. within SAMPLE_RADIUS of the ball's position, and
+//   3. closer to this ball's position than to any other (the allocation step of k-means,
+//      with the ball positions as fixed exemplars), so neighbouring balls share pixels fairly.
+vector<Mat> MakeBallSampleMasks(const vector<Point2f>& positions, const Mat& object_mask) {
+	vector<Mat> sample_masks;
+	Rect image_rect(0, 0, object_mask.cols, object_mask.rows);
+	for (int ball = 0; ball < (int)positions.size(); ball++) {
+		Mat sample_mask = Mat::zeros(object_mask.size(), CV_8UC1);
+		Rect search_box((int)positions[ball].x - SAMPLE_RADIUS, (int)positions[ball].y - SAMPLE_RADIUS,
+			2 * SAMPLE_RADIUS + 1, 2 * SAMPLE_RADIUS + 1);
+		search_box &= image_rect;
+		for (int row = search_box.y; row < search_box.y + search_box.height; row++)
+			for (int col = search_box.x; col < search_box.x + search_box.width; col++) {
+				if (object_mask.at<uchar>(row, col) == 0)
+					continue;                                              // test 1: cloth or table structure
+				Point2f pixel((float)col, (float)row);
+				double distance = norm(pixel - positions[ball]);
+				if (distance > SAMPLE_RADIUS)
+					continue;                                              // test 2: too far away
+				bool nearest = true;
+				for (int other = 0; other < (int)positions.size(); other++)
+					if (other != ball && norm(pixel - positions[other]) < distance)
+						nearest = false;                                   // test 3: closer to another ball
+				if (nearest)
+					sample_mask.at<uchar>(row, col) = 255;
+			}
+		sample_masks.push_back(sample_mask);
+	}
+	return sample_masks;
+}
+
+// for the report: each ball's sampled pixels in their real colours, everything else darkened,
+// with a small dot at each ball position
+Mat DrawBallSamples(const Mat& table_image, const vector<Point2f>& positions, const vector<Mat>& sample_masks) {
+	Mat display = table_image * 0.25;
+	for (int ball = 0; ball < (int)sample_masks.size(); ball++)
+		table_image.copyTo(display, sample_masks[ball]);
+	for (int ball = 0; ball < (int)positions.size(); ball++)
+		circle(display, positions[ball], 3, Scalar(255, 255, 255), FILLED);
+	return display;
+}
+
+// smallest and average sample size (number of pixels) in an image
+void PrintSampleSizes(const vector<Mat>& sample_masks) {
+	if (sample_masks.empty())
+		return;
+	int smallest = 1000000, total = 0;
+	for (int ball = 0; ball < (int)sample_masks.size(); ball++) {
+		int size = countNonZero(sample_masks[ball]);
+		smallest = min(smallest, size);
+		total += size;
+	}
+	cout << "   ball samples: smallest = " << smallest << " pixels, average = "
+		<< total / (int)sample_masks.size() << " pixels" << endl;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -678,7 +741,8 @@ void MyApplication() {
 	Mat training_image = LoadImage(TRAINING_IMAGE_INDEX);
 	if (training_image.empty())
 		return;
-	Mat training_smoothed = SmoothImage(RectifyTable(training_image, perspective_matrix));
+	Mat training_table = RectifyTable(training_image, perspective_matrix);   // unsmoothed (used for ball colours)
+	Mat training_smoothed = SmoothImage(training_table);
 	Mat sample_mask = MakeClothSampleMask();
 	MatND cloth_histogram = BuildClothModel(training_smoothed, sample_mask);
 
@@ -700,19 +764,31 @@ void MyApplication() {
 		return;
 	}
 
+	// Part 2 Step 2: pixel samples of the 16 labelled balls in AllBalls, at their ground-truth positions
+	vector<Point2f> training_positions;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		training_positions.push_back(GroundTruthPosition(TRAINING_IMAGE_INDEX, ball));
+	vector<Mat> training_samples = MakeBallSampleMasks(training_positions, training_object_mask);
+	Mat training_samples_display = DrawBallSamples(training_table, training_positions, training_samples);
+	cout << "Training ball samples (AllBalls):" << endl;
+	PrintSampleSizes(training_samples);
+	SaveResult("Part2_Step2_TrainingSamples", TRAINING_IMAGE_INDEX, training_samples_display);
+
 	namedWindow("Cloth sample region", WINDOW_NORMAL);
 	namedWindow("Cloth histogram (rows = hue, cols = saturation)", WINDOW_AUTOSIZE);
 	namedWindow("Table structure mask", WINDOW_NORMAL);
+	namedWindow("Training ball samples (Part 2)", WINDOW_NORMAL);
 	imshow("Cloth sample region", sample_display);
 	imshow("Cloth histogram (rows = hue, cols = saturation)", histogram_display);
 	imshow("Table structure mask", structure_mask);
+	imshow("Training ball samples (Part 2)", training_samples_display);
 	cout << "Cloth model built - press any key to process the images" << endl;
 	waitKey(0);
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Ground truth (Step 10)", WINDOW_NORMAL);
 	namedWindow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", WINDOW_NORMAL);
+	namedWindow("Ball samples (Part 2 Step 2)", WINDOW_NORMAL);
 
 	vector<vector<Detection>> all_detections(NUMBER_OF_IMAGES);
 
@@ -830,8 +906,17 @@ void MyApplication() {
 
 		all_detections[image_no] = detections;
 
-		imshow("Ground truth (Step 10)", ground_truth_display);
+		// Part 2 Step 2: pixel samples of each detected ball
+		vector<Point2f> detected_positions;
+		for (int i = 0; i < (int)detections.size(); i++)
+			detected_positions.push_back(detections[i].position);
+		vector<Mat> detection_samples = MakeBallSampleMasks(detected_positions, object_mask);
+		Mat samples_display = DrawBallSamples(table_image, detected_positions, detection_samples);
+		PrintSampleSizes(detection_samples);
+		SaveResult("Part2_Step2_Samples", image_no, samples_display);
+
 		imshow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", evaluation_display);
+		imshow("Ball samples (Part 2 Step 2)", samples_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
