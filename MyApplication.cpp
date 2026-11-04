@@ -69,17 +69,19 @@ const int MIN_CORE_DEPTH = (int)(MIN_REGION_WIDTH / 2.0);
 //  Corrections (only entries that are provably wrong, documented in the report):
 //   - Table1 balls 2, 4, 11: row > 683 is impossible (table has 683 rows) -> row and column swapped
 //   - Table1 ball 3: identical to ball 7 in the Excel file -> value from the table in the brief
-//   - AllBalls balls 11-15 are labelled differently in the Excel file and the brief (positions unaffected)
+//   - AllBalls balls 11-15: labels did not match the rack layout (each stripe sits directly below
+//     the solid of the same colour) -> labels from the brief (positions unchanged)
+//   - Table2 balls 4 and 5: labels contradicted the ball colours (4 = purple, 5 = orange) -> swapped
 // =====================================================================
 const int GROUND_TRUTH[NUMBER_OF_IMAGES][NUMBER_OF_BALLS][2] = {
 	// AllBalls.jpeg (training image)
-	{ {293,797}, {253,908}, {250,959}, {255,1013}, {256,1072}, {254,1132}, {262,1184}, {256,1244},
-	  {253,1307}, {329,901}, {330,961}, {334,1130}, {335,1013}, {336,1067}, {342,1245}, {345,1187} },
+	{ { 293,797 },{ 253,908 },{ 250,959 },{ 255,1013 },{ 256,1072 },{ 254,1132 },{ 262,1184 },{ 256,1244 },
+	  { 253,1307 },{ 329,901 },{ 330,961 },{ 335,1013 },{ 336,1067 },{ 334,1130 },{ 345,1187 },{ 342,1245 } },
 	// Table1.jpeg
 	{ {288,29}, {309,1092}, {429,1212}, {383,1131}, {335,1050}, {285,1211}, {261,1170}, {352,1173},
 	  {331,1132}, {240,1210}, {310,1170}, {407,1169}, {281,1135}, {374,1212}, {360,1091}, {331,1213} },
 	// Table2.jpeg
-	{ {507,1169}, {282,1103}, {620,1224}, {391,1121}, {310,1305}, {315,1046}, {202,621}, {361,1173},
+	{ { 507,1169 },{ 282,1103 },{ 620,1224 },{ 391,1121 },{ 315,1046 },{ 310,1305 },{ 202,621 },{ 361,1173 },
 	  {331,1132}, {177,725}, {185,1269}, {665,798}, {296,438}, {53,1235}, {362,1090}, {399,1205} },
 	// Table3.jpeg
 	{ {434,29}, {23,908}, {616,1224}, {447,1199}, {336,29}, {305,1406}, {210,621}, {260,1294},
@@ -490,14 +492,17 @@ void CheckGroundTruth() {
 				<< " is outside the table" << endl;
 }
 
-// for checking the ground truth: magenta circle and label at every true ball position
+// for checking the ground truth: magenta circle at every true ball position, with its label
+// drawn beside the ball (so the ball's colour stays visible) in outlined text
 Mat DrawGroundTruth(const Mat& table_image, int image_no) {
 	Mat display = table_image.clone();
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 		if (BallPresent(image_no, ball)) {
 			Point2f position = GroundTruthPosition(image_no, ball);
 			circle(display, position, BALL_DIAMETER / 2, Scalar(255, 0, 255), 2);
-			putText(display, BallName(ball), position + Point2f(-8, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 2);
+			Point2f label_position = position + Point2f((float)(BALL_DIAMETER / 2 + 2), 6.0f);
+			putText(display, BallName(ball), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 4);
+			putText(display, BallName(ball), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 2);
 		}
 	return display;
 }
