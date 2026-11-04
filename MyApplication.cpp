@@ -104,6 +104,17 @@ const double MATCH_DISTANCE = BALL_DIAMETER / 2.0;
 // (balls are stretched: the learned single-ball area is about 1.9 times a flat 43mm circle)
 const int SAMPLE_RADIUS = BALL_DIAMETER;
 
+// Part 2 Step 3: 3D colour histogram (hue, luminance, saturation) describing each ball.
+// Luminance is used here (unlike the cloth model): red vs maroon, black and white differ mainly in brightness.
+const int BALL_HUE_BINS = 18;                // 10 hue values (20 degrees) per bin: hue is the main colour identity
+const int BALL_LUMINANCE_BINS = 4;           // 64 levels per bin: brightness varies across the curved ball
+const int BALL_SATURATION_BINS = 4;          // 64 levels per bin
+const int HUE_BIN_WIDTH = 180 / BALL_HUE_BINS;
+const int LEVEL_BIN_WIDTH = 256 / BALL_LUMINANCE_BINS;
+const int BALL_HISTOGRAM_SIZE = BALL_HUE_BINS * BALL_LUMINANCE_BINS * BALL_SATURATION_BINS;   // 288
+// hue is circular (red is at both 0 and 179): shift it by half a bin so all reds fall into one bin
+const int HUE_BIN_OFFSET = HUE_BIN_WIDTH / 2;
+
 const int HUE_BINS = 36;             
 const int SATURATION_BINS = 32;      
 const int HS_CHANNELS[] = { 0, 2 };
@@ -686,6 +697,78 @@ void PrintSampleSizes(const vector<Mat>& sample_masks) {
 		<< total / (int)sample_masks.size() << " pixels" << endl;
 }
 
+// which of the 288 bins a pixel's (hue, luminance, saturation) falls into
+int BallHistogramBin(const Vec3b& hls) {
+	int hue_bin = ((hls[0] + HUE_BIN_OFFSET) % 180) / HUE_BIN_WIDTH;   // shifted so red is not split
+	int luminance_bin = hls[1] / LEVEL_BIN_WIDTH;
+	int saturation_bin = hls[2] / LEVEL_BIN_WIDTH;
+	return (hue_bin * BALL_LUMINANCE_BINS + luminance_bin) * BALL_SATURATION_BINS + saturation_bin;
+}
+
+// the colour of the centre of a bin (for drawing)
+Scalar BinColour(int bin) {
+	int saturation_bin = bin % BALL_SATURATION_BINS;
+	int luminance_bin = (bin / BALL_SATURATION_BINS) % BALL_LUMINANCE_BINS;
+	int hue_bin = bin / (BALL_SATURATION_BINS * BALL_LUMINANCE_BINS);
+	int hue = (hue_bin * HUE_BIN_WIDTH + HUE_BIN_WIDTH / 2 - HUE_BIN_OFFSET + 180) % 180;   // undo the shift
+	Mat hls_colour(1, 1, CV_8UC3, Scalar(hue, luminance_bin * LEVEL_BIN_WIDTH + LEVEL_BIN_WIDTH / 2,
+		saturation_bin * LEVEL_BIN_WIDTH + LEVEL_BIN_WIDTH / 2));
+	Mat bgr_colour;
+	cvtColor(hls_colour, bgr_colour, COLOR_HLS2BGR);
+	Vec3b colour = bgr_colour.at<Vec3b>(0, 0);
+	return Scalar(colour[0], colour[1], colour[2]);
+}
+
+// 3D (hue, luminance, saturation) histogram of a ball's sample pixels, normalised so it sums to 1
+// (proportions, so partial balls with fewer pixels can still be compared with whole balls)
+Mat BallColourHistogram(const Mat& hls_image, const Mat& sample_mask) {
+	Mat histogram = Mat::zeros(1, BALL_HISTOGRAM_SIZE, CV_32F);
+	if (countNonZero(sample_mask) == 0)
+		return histogram;
+	Rect box = boundingRect(sample_mask);       // only look where the sample is
+	int pixel_count = 0;
+	for (int row = box.y; row < box.y + box.height; row++)
+		for (int col = box.x; col < box.x + box.width; col++)
+			if (sample_mask.at<uchar>(row, col) != 0) {
+				histogram.at<float>(0, BallHistogramBin(hls_image.at<Vec3b>(row, col)))++;
+				pixel_count++;
+			}
+	histogram /= (float)pixel_count;
+	return histogram;
+}
+
+// fraction of a ball's pixels that are "white", where white = the typical colours of the white ball
+// in the training image (bins holding more than an even share, 1/288, of the white ball's pixels)
+double WhiteFraction(const Mat& histogram, const Mat& white_ball_histogram) {
+	double white_fraction = 0.0;
+	for (int bin = 0; bin < BALL_HISTOGRAM_SIZE; bin++)
+		if (white_ball_histogram.at<float>(0, bin) > 1.0f / BALL_HISTOGRAM_SIZE)
+			white_fraction += histogram.at<float>(0, bin);
+	return white_fraction;
+}
+
+// for the report: each ball's "colour signature" = its 6 most common bins, drawn as one bar split
+// in proportion to their shares, each part filled with that bin's colour
+Mat DrawColourSignatures(const vector<Mat>& histograms) {
+	const int row_height = 30, label_width = 50, bar_width = 400;
+	Mat display((int)histograms.size() * row_height, label_width + bar_width, CV_8UC3, Scalar(255, 255, 255));
+	for (int ball = 0; ball < (int)histograms.size(); ball++) {
+		vector<pair<float, int>> bins;
+		for (int bin = 0; bin < BALL_HISTOGRAM_SIZE; bin++)
+			bins.push_back(make_pair(histograms[ball].at<float>(0, bin), bin));
+		sort(bins.rbegin(), bins.rend());                         // most common first
+		putText(display, BallName(ball), Point(8, ball * row_height + 21), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 2);
+		int x = label_width;
+		for (int i = 0; i < 6; i++) {
+			int width = (int)round(bins[i].first * bar_width);
+			rectangle(display, Rect(x, ball * row_height + 4, width, row_height - 8), BinColour(bins[i].second), FILLED);
+			x += width;
+		}
+		rectangle(display, Rect(label_width, ball * row_height + 4, bar_width, row_height - 8), Scalar(180, 180, 180), 1);
+	}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -774,14 +857,32 @@ void MyApplication() {
 	PrintSampleSizes(training_samples);
 	SaveResult("Part2_Step2_TrainingSamples", TRAINING_IMAGE_INDEX, training_samples_display);
 
+	// Part 2 Step 3: colour features of the 16 training balls (from the UNSMOOTHED image)
+	Mat training_hls;
+	cvtColor(training_table, training_hls, COLOR_BGR2HLS);
+	vector<Mat> training_histograms;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		training_histograms.push_back(BallColourHistogram(training_hls, training_samples[ball]));
+	Mat white_ball_histogram = training_histograms[0];         // ball 0 = the white ball
+
+	cout << "Training ball features (white fraction):" << endl;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		cout << "   ball " << BallName(ball) << ": " << fixed << setprecision(2)
+		<< WhiteFraction(training_histograms[ball], white_ball_histogram) << endl;
+
+	Mat signatures_display = DrawColourSignatures(training_histograms);
+	SaveResult("Part2_Step3_ColourSignatures", TRAINING_IMAGE_INDEX, signatures_display);
+
 	namedWindow("Cloth sample region", WINDOW_NORMAL);
 	namedWindow("Cloth histogram (rows = hue, cols = saturation)", WINDOW_AUTOSIZE);
 	namedWindow("Table structure mask", WINDOW_NORMAL);
 	namedWindow("Training ball samples (Part 2)", WINDOW_NORMAL);
+	namedWindow("Training colour signatures (Part 2)", WINDOW_AUTOSIZE);
 	imshow("Cloth sample region", sample_display);
 	imshow("Cloth histogram (rows = hue, cols = saturation)", histogram_display);
 	imshow("Table structure mask", structure_mask);
 	imshow("Training ball samples (Part 2)", training_samples_display);
+	imshow("Training colour signatures (Part 2)", signatures_display);
 	cout << "Cloth model built - press any key to process the images" << endl;
 	waitKey(0);
 	cv::destroyAllWindows();
