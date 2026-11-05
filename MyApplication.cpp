@@ -903,6 +903,54 @@ Mat DrawRecognitionResult(const Mat& table_image, const vector<Detection>& detec
 	return display;
 }
 
+// save a figure that isn't tied to one image
+void SaveFigure(const string& name, const Mat& image) {
+	string filename = string(RESULTS_LOCATION) + name + ".png";
+	if (!imwrite(filename, image))
+		cout << "Could not save " << filename << endl;
+}
+
+// rows = true label, columns = recognised label
+void PrintConfusionMatrix(const int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS]) {
+	cout << "Confusion matrix (rows = true, columns = recognised):" << endl << "     ";
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		cout << setw(3) << BallName(ball);
+	cout << endl;
+	for (int true_ball = 0; true_ball < NUMBER_OF_BALLS; true_ball++) {
+		cout << "  " << setw(3) << BallName(true_ball);
+		for (int recognised = 0; recognised < NUMBER_OF_BALLS; recognised++) {
+			int count = confusion[true_ball][recognised];
+			if (count == 0) cout << "  .";
+			else cout << setw(3) << count;
+		}
+		cout << endl;
+	}
+}
+
+// confusion matrix as an image: green = correct, red = confused
+Mat DrawConfusionMatrix(const int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS]) {
+	const int cell = 40, header = 40;
+	int size = header + NUMBER_OF_BALLS * cell + 1;
+	Mat display(size, size, CV_8UC3, Scalar(255, 255, 255));
+	putText(display, "T\\R", Point(4, 26), FONT_HERSHEY_SIMPLEX, 0.45, Scalar(0, 0, 0), 1);
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++) {
+		putText(display, BallName(ball), Point(header + ball * cell + 10, 26), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0), 1);
+		putText(display, BallName(ball), Point(10, header + ball * cell + 26), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0), 1);
+	}
+	for (int true_ball = 0; true_ball < NUMBER_OF_BALLS; true_ball++)
+		for (int recognised = 0; recognised < NUMBER_OF_BALLS; recognised++) {
+			Rect cell_rect(header + recognised * cell, header + true_ball * cell, cell, cell);
+			int count = confusion[true_ball][recognised];
+			Scalar fill = (count == 0) ? Scalar(255, 255, 255) :
+				(true_ball == recognised) ? Scalar(130, 220, 130) : Scalar(130, 130, 240);
+			rectangle(display, cell_rect, fill, FILLED);
+			rectangle(display, cell_rect, Scalar(200, 200, 200), 1);
+			if (count > 0)
+				putText(display, to_string(count), Point(cell_rect.x + 13, cell_rect.y + 27), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 2);
+		}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -1026,6 +1074,9 @@ void MyApplication() {
 	namedWindow("Recognition result (Part 2 Step 6): green = correct, red = wrong (true), grey = false positive, yellow = missed", WINDOW_NORMAL);
 
 	vector<vector<Detection>> all_detections(NUMBER_OF_IMAGES);
+	vector<vector<Mat>> all_detection_histograms(NUMBER_OF_IMAGES);
+	int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS] = {};
+	int total_correct = 0, total_located = 0, total_balls = 0;
 
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 	{
@@ -1178,6 +1229,17 @@ void MyApplication() {
 		Mat recognition_result_display = DrawRecognitionResult(table_image, detections, labels, recognition, evaluation, image_no);
 		SaveResult("Part2_Step6_RecognitionResult", image_no, recognition_result_display);
 
+		// totals and confusion matrix (test images only)
+		all_detection_histograms[image_no] = detection_histograms;
+		if (image_no != TRAINING_IMAGE_INDEX) {
+			total_correct += recognition.correct;
+			total_located += recognition.located;
+			total_balls += recognition.balls_present;
+			for (int i = 0; i < (int)labels.size(); i++)
+				if (recognition.true_labels[i] >= 0 && labels[i] >= 0)
+					confusion[recognition.true_labels[i]][labels[i]]++;
+		}
+
 		imshow("Recognition (Part 2 Step 5)", recognition_display);
 		imshow("Recognition result (Part 2 Step 6): green = correct, red = wrong (true), grey = false positive, yellow = missed", recognition_result_display);
 		waitKey(0);
@@ -1193,4 +1255,13 @@ void MyApplication() {
 	const double distances[] = { 10.0, BALL_DIAMETER / 2.0, 32.0, (double)BALL_DIAMETER };
 	for (int i = 0; i < 4; i++)
 		PrintOverallResults(all_detections, distances[i]);
+
+	// Part 2 overall results (test images only)
+	cout << endl << "PART 2 RECOGNITION RESULTS (test images Table1-6):" << endl << fixed << setprecision(2)
+		<< "   recognition accuracy: " << total_correct << " of " << total_located << " located balls = "
+		<< (total_located > 0 ? (double)total_correct / total_located : 0.0) << endl
+		<< "   end-to-end: " << total_correct << " of " << total_balls << " balls found and labelled correctly = "
+		<< (total_balls > 0 ? (double)total_correct / total_balls : 0.0) << endl << endl;
+	PrintConfusionMatrix(confusion);
+	SaveFigure("Part2_Step6_ConfusionMatrix", DrawConfusionMatrix(confusion));
 }
