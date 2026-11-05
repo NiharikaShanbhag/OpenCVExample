@@ -769,6 +769,70 @@ Mat DrawColourSignatures(const vector<Mat>& histograms) {
 	return display;
 }
 
+// Part 2 Step 5: dissimilarity between two ball colour histograms.
+// Bhattacharyya distance: designed for normalised histograms (probability distributions);
+// the square root reduces the dominance of large bins; 0 = identical, 1 = no overlap.
+double HistogramDistance(const Mat& histogram1, const Mat& histogram2) {
+	return compareHist(histogram1, histogram2, HISTCMP_BHATTACHARYYA);
+}
+
+// recognise each detection independently: the label of the closest training ball
+vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms) {
+	vector<int> labels;
+	for (int detection = 0; detection < (int)detection_histograms.size(); detection++) {
+		int best_ball = 0;
+		double best_distance = HistogramDistance(detection_histograms[detection], training_histograms[0]);
+		for (int ball = 1; ball < NUMBER_OF_BALLS; ball++) {
+			double distance = HistogramDistance(detection_histograms[detection], training_histograms[ball]);
+			if (distance < best_distance) {
+				best_distance = distance;
+				best_ball = ball;
+			}
+		}
+		labels.push_back(best_ball);
+	}
+	return labels;
+}
+
+// recognise all detections in an image together, using the fact that each ball appears at most once:
+// all (detection, ball) pairs are sorted closest first, and a pair is accepted only if neither the
+// detection nor the label has been used yet (the most confident matches are made first)
+vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms) {
+	vector<pair<double, pair<int, int>>> candidate_pairs;     // (distance, (detection, ball))
+	for (int detection = 0; detection < (int)detection_histograms.size(); detection++)
+		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+			candidate_pairs.push_back(make_pair(
+				HistogramDistance(detection_histograms[detection], training_histograms[ball]),
+				make_pair(detection, ball)));
+	sort(candidate_pairs.begin(), candidate_pairs.end());
+
+	vector<int> labels(detection_histograms.size(), -1);
+	vector<bool> label_used(NUMBER_OF_BALLS, false);
+	for (int i = 0; i < (int)candidate_pairs.size(); i++) {
+		int detection = candidate_pairs[i].second.first;
+		int ball = candidate_pairs[i].second.second;
+		if (labels[detection] == -1 && !label_used[ball]) {
+			labels[detection] = ball;
+			label_used[ball] = true;
+		}
+	}
+	return labels;
+}
+
+// for the report: each detection with its recognised label written beside it
+Mat DrawRecognition(const Mat& table_image, const vector<Detection>& detections, const vector<int>& labels) {
+	Mat display = table_image.clone();
+	for (int i = 0; i < (int)detections.size(); i++) {
+		circle(display, detections[i].position, BALL_DIAMETER / 2, Scalar(255, 255, 255), 2);
+		if (labels[i] < 0)
+			continue;
+		Point2f label_position = detections[i].position + Point2f((float)(BALL_DIAMETER / 2 + 2), 6.0f);
+		putText(display, BallName(labels[i]), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 4);
+		putText(display, BallName(labels[i]), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 2);
+	}
+	return display;
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -889,7 +953,7 @@ void MyApplication() {
 
 	// ---- Process every image ----
 	namedWindow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", WINDOW_NORMAL);
-	namedWindow("Ball samples (Part 2 Step 2)", WINDOW_NORMAL);
+	namedWindow("Recognition (Part 2 Step 5)", WINDOW_NORMAL);
 
 	vector<vector<Detection>> all_detections(NUMBER_OF_IMAGES);
 
@@ -1016,8 +1080,30 @@ void MyApplication() {
 		PrintSampleSizes(detection_samples);
 		SaveResult("Part2_Step2_Samples", image_no, samples_display);
 
+		// Part 2 Step 5: recognise each detected ball (colours from the UNSMOOTHED image)
+		Mat hls_image;
+		cvtColor(table_image, hls_image, COLOR_BGR2HLS);
+		vector<Mat> detection_histograms;
+		for (int i = 0; i < (int)detection_samples.size(); i++)
+			detection_histograms.push_back(BallColourHistogram(hls_image, detection_samples[i]));
+		vector<int> labels = RecogniseBalls(detection_histograms, training_histograms);
+		vector<int> independent_labels = RecogniseBallsIndependently(detection_histograms, training_histograms);
+
+		cout << "   recognised (row,col)=label:";
+		int changed_by_rule = 0;
+		for (int i = 0; i < (int)detections.size(); i++) {
+			cout << " (" << (int)round(detections[i].position.y) << "," << (int)round(detections[i].position.x)
+				<< ")=" << (labels[i] >= 0 ? BallName(labels[i]) : "?");
+			if (labels[i] != independent_labels[i])
+				changed_by_rule++;
+		}
+		cout << endl << "   labels changed by the one-of-each rule: " << changed_by_rule << endl;
+
+		Mat recognition_display = DrawRecognition(table_image, detections, labels);
+		SaveResult("Part2_Step5_Recognition", image_no, recognition_display);
+
 		imshow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", evaluation_display);
-		imshow("Ball samples (Part 2 Step 2)", samples_display);
+		imshow("Recognition (Part 2 Step 5)", recognition_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
