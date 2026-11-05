@@ -769,21 +769,25 @@ Mat DrawColourSignatures(const vector<Mat>& histograms) {
 	return display;
 }
 
-// Part 2 Step 5: dissimilarity between two ball colour histograms.
-// Bhattacharyya distance: designed for normalised histograms (probability distributions);
+// Part 2 Step 5: dissimilarity between two ball colour histograms (smaller = more similar).
+// Default = Bhattacharyya distance: designed for normalised histograms (probability distributions);
 // the square root reduces the dominance of large bins; 0 = identical, 1 = no overlap.
-double HistogramDistance(const Mat& histogram1, const Mat& histogram2) {
-	return compareHist(histogram1, histogram2, HISTCMP_BHATTACHARYYA);
+// Correlation and intersection are similarities (1 = identical), so they are turned into 1 - score.
+double HistogramDistance(const Mat& histogram1, const Mat& histogram2, int method = HISTCMP_BHATTACHARYYA) {
+	double score = compareHist(histogram1, histogram2, method);
+	if (method == HISTCMP_CORREL || method == HISTCMP_INTERSECT)
+		return 1.0 - score;
+	return score;
 }
 
 // recognise each detection independently: the label of the closest training ball
-vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms) {
+vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {   // <-- changed
 	vector<int> labels;
 	for (int detection = 0; detection < (int)detection_histograms.size(); detection++) {
 		int best_ball = 0;
-		double best_distance = HistogramDistance(detection_histograms[detection], training_histograms[0]);
+		double best_distance = HistogramDistance(detection_histograms[detection], training_histograms[0], method);   // <-- changed
 		for (int ball = 1; ball < NUMBER_OF_BALLS; ball++) {
-			double distance = HistogramDistance(detection_histograms[detection], training_histograms[ball]);
+			double distance = HistogramDistance(detection_histograms[detection], training_histograms[ball], method);   // <-- changed
 			if (distance < best_distance) {
 				best_distance = distance;
 				best_ball = ball;
@@ -797,12 +801,12 @@ vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms,
 // recognise all detections in an image together, using the fact that each ball appears at most once:
 // all (detection, ball) pairs are sorted closest first, and a pair is accepted only if neither the
 // detection nor the label has been used yet (the most confident matches are made first)
-vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms) {
+vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {   // <-- changed
 	vector<pair<double, pair<int, int>>> candidate_pairs;     // (distance, (detection, ball))
 	for (int detection = 0; detection < (int)detection_histograms.size(); detection++)
 		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 			candidate_pairs.push_back(make_pair(
-				HistogramDistance(detection_histograms[detection], training_histograms[ball]),
+				HistogramDistance(detection_histograms[detection], training_histograms[ball], method),   // <-- changed
 				make_pair(detection, ball)));
 	sort(candidate_pairs.begin(), candidate_pairs.end());
 
@@ -829,6 +833,72 @@ Mat DrawRecognition(const Mat& table_image, const vector<Detection>& detections,
 		Point2f label_position = detections[i].position + Point2f((float)(BALL_DIAMETER / 2 + 2), 6.0f);
 		putText(display, BallName(labels[i]), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 4);
 		putText(display, BallName(labels[i]), label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 2);
+	}
+	return display;
+}
+
+// Part 2 Step 6: recognition results for one image.
+// true_labels[d] = the ground-truth ball that detection d was matched to in Part 1 (-1 = false positive)
+struct RecognitionResult {
+	int located = 0, correct = 0, balls_present = 0;
+	vector<int> true_labels;
+};
+
+// compare recognised labels with the true labels of the detections that Part 1 matched to real balls
+RecognitionResult EvaluateRecognition(const vector<int>& labels, const EvaluationResult& detection_evaluation, int image_no) {
+	RecognitionResult result;
+	result.true_labels.assign(labels.size(), -1);
+	for (int i = 0; i < (int)detection_evaluation.matches.size(); i++)
+		result.true_labels[detection_evaluation.matches[i].second] = detection_evaluation.matches[i].first;
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		if (BallPresent(image_no, ball))
+			result.balls_present++;
+	for (int detection = 0; detection < (int)labels.size(); detection++)
+		if (result.true_labels[detection] >= 0) {
+			result.located++;
+			if (labels[detection] == result.true_labels[detection])
+				result.correct++;
+		}
+	return result;
+}
+
+void PrintRecognition(const RecognitionResult& result) {
+	cout << fixed << setprecision(2)
+		<< "   recognition: " << result.correct << " of " << result.located << " located balls correct (accuracy "
+		<< (result.located > 0 ? (double)result.correct / result.located : 0.0) << "), end-to-end: "
+		<< result.correct << " of " << result.balls_present << " balls found and labelled correctly ("
+		<< (result.balls_present > 0 ? (double)result.correct / result.balls_present : 0.0) << ")" << endl;
+}
+
+// draw a label in outlined text beside a ball
+void DrawLabel(Mat& display, const Point2f& position, const string& text, const Scalar& colour) {
+	Point2f label_position = position + Point2f((float)(BALL_DIAMETER / 2 + 2), 6.0f);
+	putText(display, text, label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 4);
+	putText(display, text, label_position, FONT_HERSHEY_SIMPLEX, 0.6, colour, 2);
+}
+
+// for the report: green = correctly recognised, red "a (b)" = recognised as a but actually b,
+// grey = false positive detection (no true ball), yellow circle = missed ball (with its true label)
+Mat DrawRecognitionResult(const Mat& table_image, const vector<Detection>& detections, const vector<int>& labels,
+	const RecognitionResult& recognition, const EvaluationResult& detection_evaluation, int image_no) {
+	Mat display = table_image.clone();
+	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
+		if (BallPresent(image_no, ball) && !detection_evaluation.ball_matched[ball]) {
+			circle(display, GroundTruthPosition(image_no, ball), BALL_DIAMETER / 2, Scalar(0, 255, 255), 2);
+			DrawLabel(display, GroundTruthPosition(image_no, ball), BallName(ball), Scalar(0, 255, 255));
+		}
+	for (int i = 0; i < (int)detections.size(); i++) {
+		int true_label = recognition.true_labels[i];
+		string text = (labels[i] >= 0) ? BallName(labels[i]) : "?";
+		Scalar colour = Scalar(160, 160, 160);                          // false positive
+		if (true_label >= 0 && labels[i] == true_label)
+			colour = Scalar(0, 255, 0);                                 // correct
+		else if (true_label >= 0) {
+			colour = Scalar(0, 0, 255);                                 // wrong
+			text += " (" + BallName(true_label) + ")";
+		}
+		circle(display, detections[i].position, BALL_DIAMETER / 2, colour, 2);
+		DrawLabel(display, detections[i].position, text, colour);
 	}
 	return display;
 }
@@ -952,8 +1022,8 @@ void MyApplication() {
 	cv::destroyAllWindows();
 
 	// ---- Process every image ----
-	namedWindow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", WINDOW_NORMAL);
 	namedWindow("Recognition (Part 2 Step 5)", WINDOW_NORMAL);
+	namedWindow("Recognition result (Part 2 Step 6): green = correct, red = wrong (true), grey = false positive, yellow = missed", WINDOW_NORMAL);
 
 	vector<vector<Detection>> all_detections(NUMBER_OF_IMAGES);
 
@@ -1102,8 +1172,14 @@ void MyApplication() {
 		Mat recognition_display = DrawRecognition(table_image, detections, labels);
 		SaveResult("Part2_Step5_Recognition", image_no, recognition_display);
 
-		imshow("Evaluation (Step 10): green = match, red = false positive, yellow = missed", evaluation_display);
+		// Part 2 Step 6: evaluate recognition against the ground-truth labels
+		RecognitionResult recognition = EvaluateRecognition(labels, evaluation, image_no);
+		PrintRecognition(recognition);
+		Mat recognition_result_display = DrawRecognitionResult(table_image, detections, labels, recognition, evaluation, image_no);
+		SaveResult("Part2_Step6_RecognitionResult", image_no, recognition_result_display);
+
 		imshow("Recognition (Part 2 Step 5)", recognition_display);
+		imshow("Recognition result (Part 2 Step 6): green = correct, red = wrong (true), grey = false positive, yellow = missed", recognition_result_display);
 		waitKey(0);
 	}
 	cv::destroyAllWindows();
