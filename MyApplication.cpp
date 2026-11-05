@@ -951,6 +951,30 @@ Mat DrawConfusionMatrix(const int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS]) {
 	return display;
 }
 
+// accuracy for each histogram metric, with and without the one-of-each rule (evaluation only)
+void PrintRecognitionComparison(const vector<vector<Detection>>& all_detections,
+	const vector<vector<Mat>>& all_detection_histograms, const vector<Mat>& training_histograms) {
+	const int methods[] = { HISTCMP_BHATTACHARYYA, HISTCMP_CORREL, HISTCMP_CHISQR, HISTCMP_INTERSECT };
+	const char* method_names[] = { "Bhattacharyya", "Correlation  ", "Chi-square   ", "Intersection " };
+	cout << endl << "Recognition accuracy by metric (test images, located balls):" << endl;
+	for (int m = 0; m < 4; m++)
+		for (int use_rule = 1; use_rule >= 0; use_rule--) {
+			int correct = 0, located = 0;
+			for (int image_no = 1; image_no < NUMBER_OF_IMAGES; image_no++) {
+				vector<int> labels = use_rule ?
+					RecogniseBalls(all_detection_histograms[image_no], training_histograms, methods[m]) :
+					RecogniseBallsIndependently(all_detection_histograms[image_no], training_histograms, methods[m]);
+				EvaluationResult evaluation = EvaluateDetections(all_detections[image_no], image_no, MATCH_DISTANCE);
+				RecognitionResult recognition = EvaluateRecognition(labels, evaluation, image_no);
+				correct += recognition.correct;
+				located += recognition.located;
+			}
+			cout << "   " << method_names[m] << (use_rule ? "  with one-of-each rule: " : "  without (independent):  ")
+				<< correct << " of " << located << " = " << fixed << setprecision(2)
+				<< (located > 0 ? (double)correct / located : 0.0) << endl;
+		}
+}
+
 // for the report: histogram of the cloth probability image (log scale so small counts are visible)
 // with Otsu's threshold marked as a red line
 Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
@@ -1264,4 +1288,6 @@ void MyApplication() {
 		<< (total_balls > 0 ? (double)total_correct / total_balls : 0.0) << endl << endl;
 	PrintConfusionMatrix(confusion);
 	SaveFigure("Part2_Step6_ConfusionMatrix", DrawConfusionMatrix(confusion));
+
+	PrintRecognitionComparison(all_detections, all_detection_histograms, training_histograms);
 }
