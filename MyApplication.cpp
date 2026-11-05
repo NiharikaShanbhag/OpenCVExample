@@ -7,7 +7,7 @@
 const int TABLE_ROWS = 683;
 const int TABLE_COLS = 1434;
 const int NUMBER_OF_IMAGES = 7;
-const int TRAINING_IMAGE_INDEX = 0;
+const int TRAINING_IMAGE_INDEX = 0;			// AllBalls is the only training image
 
 const char* const FILE_LOCATION = "Media/Pool/";
 const char* const RESULTS_LOCATION = "Media/Pool/Results/";
@@ -21,7 +21,7 @@ const char* const POOL_FILES[NUMBER_OF_IMAGES] = {
 	"Table6.jpeg"
 };
 
-// table corners in the original image. Point2f is (x, y) = (column, row)
+// table corners in the original image, as (column, row)
 const Point2f IMAGE_CORNERS[4] = {
 	Point2f(337.0f, 35.0f),		// top left
 	Point2f(1570.0f, 21.0f),	// top right
@@ -29,7 +29,7 @@ const Point2f IMAGE_CORNERS[4] = {
 	Point2f(38.0f, 472.0f),		// bottom left 
 };
 
-// where those corners go in the rectified table image
+// where those corners go in the rectified table image (1 pixrel = 1mm)
 const Point2f TABLE_CORNERS[4] = {
 	Point2f(0.0f, 0.0f),					
 	Point2f((float)(TABLE_COLS - 1), 0.0f),		
@@ -37,17 +37,15 @@ const Point2f TABLE_CORNERS[4] = {
 	Point2f(0.0f, (float)(TABLE_ROWS - 1)),		
 };
 
+// 5mm: well below the ball size (43mm) but bigger than the noise
 const int MEDIAN_FILTER_SIZE = 5;
 const int MORPHOLOGY_ELEMENT_SIZE = 5;
 
-// Cloth sample = the whole table in the TRAINING image (AllBalls.jpeg), except:
-//  - a border along the cushions, where the cushions and pockets are
-//  - the area containing the balls, found from the AllBalls ground truth
-//    (box around all 16 balls, expanded by 2 ball diameters to cover the stretched balls)
-const int BALL_DIAMETER = 43;     // mm, from the brief
-const int CUSHION_MARGIN = 60;    // mm
+const int BALL_DIAMETER = 43;     // mm
+const int CUSHION_MARGIN = 60;    // mm, keeps cushions and pockets out of the cloth sample
 const int NUMBER_OF_BALLS = 16;
-// AllBalls ground truth ball positions as (column, row), from the brief
+
+// AllBalls ball positions as (column, row), used to leave the balls out of the cloth sample
 const Point ALLBALLS_BALL_POSITIONS[NUMBER_OF_BALLS] = {
 	Point(797, 293),  Point(908, 253),  Point(959, 250),  Point(1013, 255),
 	Point(1072, 256), Point(1132, 254), Point(1184, 262), Point(1244, 256),
@@ -55,24 +53,19 @@ const Point ALLBALLS_BALL_POSITIONS[NUMBER_OF_BALLS] = {
 	Point(1067, 336), Point(1130, 334), Point(1187, 345), Point(1245, 342)
 };
 
-// Region classification (Step 7)
-const double MIN_AREA_FRACTION = 0.5;                  // a ball must be at least half visible to be found
-const double MIN_REGION_WIDTH = BALL_DIAMETER / 2.0;   // even half a ball is at least a ball radius wide (rejects thin slivers)
+// region classification - a ball must be at least half visible and even half a ball is a radius wide
+const double MIN_AREA_FRACTION = 0.5;                  
+const double MIN_REGION_WIDTH = BALL_DIAMETER / 2.0;   
 
-// Splitting (Step 8): erosion with a 3x3 element removes 1mm from each edge, so a piece that survives
-// d erosions is about 2d mm thick. A ball core must be at least MIN_REGION_WIDTH thick (as in Step 7).
+// splitting - each 3x3 erosion removes 1mm per side, so a core must survive about half the min width 
 const int MIN_CORE_DEPTH = (int)(MIN_REGION_WIDTH / 2.0);
 
-// =====================================================================
-//  Ground truth (Step 10), from the Excel file provided with the brief.
-//  [image][ball] = {row, column}; ball 0 = white, 1-15 = numbered; {-1,-1} = not on the table.
-//  Corrections (only entries that are provably wrong, documented in the report):
-//   - Table1 balls 2, 4, 11: row > 683 is impossible (table has 683 rows) -> row and column swapped
-//   - Table1 ball 3: identical to ball 7 in the Excel file -> value from the table in the brief
-//   - AllBalls balls 11-15: labels did not match the rack layout (each stripe sits directly below
-//     the solid of the same colour) -> labels from the brief (positions unchanged)
-//   - Table2 balls 4 and 5: labels contradicted the ball colours (4 = purple, 5 = orange) -> swapped
-// =====================================================================
+// ground truth from the Excel file: [image][ball] = {row, column}, ball 0 = white, {-1, -1} = not on table
+// corrections: -
+// - Table1 balls 2, 4, 11 - row > 683 is impossible, so row and column swapped
+// - Table1 ball 3 - same as ball 7 in the Excel file, value taken from the brief 
+// - AllBalls 11-15 - labels didn't match the rack layout, labels taken from the brief
+// - Table2 balls 4 and 5 - labels didn't match the ball colours, swapped
 const int GROUND_TRUTH[NUMBER_OF_IMAGES][NUMBER_OF_BALLS][2] = {
 	// AllBalls.jpeg (training image)
 	{ { 293,797 },{ 253,908 },{ 250,959 },{ 255,1013 },{ 256,1072 },{ 254,1132 },{ 262,1184 },{ 256,1244 },
@@ -97,24 +90,22 @@ const int GROUND_TRUTH[NUMBER_OF_IMAGES][NUMBER_OF_BALLS][2] = {
 	  {226,1252}, {538,72}, {171,1270}, {-1,-1}, {249,351}, {-1,-1}, {169,901}, {399,1201} }
 };
 
-// a detection is correct if it lies on the true ball, i.e. within one ball radius of its true position
+// a detection counts as correct if it is within one ball radius of the true position
 const double MATCH_DISTANCE = BALL_DIAMETER / 2.0;
 
-// Part 2: a ball's pixels reach up to about one ball diameter from its position in the rectified image
-// (balls are stretched: the learned single-ball area is about 1.9 times a flat 43mm circle)
+// balls are stretched by about 2x, so their pixels reach about one diameter from the centre
 const int SAMPLE_RADIUS = BALL_DIAMETER;
 
-// Part 2 Step 3: 3D colour histogram (hue, luminance, saturation) describing each ball.
-// Luminance is used here (unlike the cloth model): red vs maroon, black and white differ mainly in brightness.
-const int BALL_HUE_BINS = 18;                // 10 hue values (20 degrees) per bin: hue is the main colour identity
-const int BALL_LUMINANCE_BINS = 4;           // 64 levels per bin: brightness varies across the curved ball
-const int BALL_SATURATION_BINS = 4;          // 64 levels per bin
+// ball colour histogram: hue, luminance, saturation (luminance needed for red vs maroon, black, white)
+const int BALL_HUE_BINS = 18;                
+const int BALL_LUMINANCE_BINS = 4;           
+const int BALL_SATURATION_BINS = 4;          
 const int HUE_BIN_WIDTH = 180 / BALL_HUE_BINS;
 const int LEVEL_BIN_WIDTH = 256 / BALL_LUMINANCE_BINS;
-const int BALL_HISTOGRAM_SIZE = BALL_HUE_BINS * BALL_LUMINANCE_BINS * BALL_SATURATION_BINS;   // 288
-// hue is circular (red is at both 0 and 179): shift it by half a bin so all reds fall into one bin
-const int HUE_BIN_OFFSET = HUE_BIN_WIDTH / 2;
+const int BALL_HISTOGRAM_SIZE = BALL_HUE_BINS * BALL_LUMINANCE_BINS * BALL_SATURATION_BINS;   
+const int HUE_BIN_OFFSET = HUE_BIN_WIDTH / 2;		// shift hue so red (0 and 179) isn't split across bins
 
+// cloth model - hue-saturation histogram (luminance ignored so shadows still look like cloth)
 const int HUE_BINS = 36;             
 const int SATURATION_BINS = 32;      
 const int HS_CHANNELS[] = { 0, 2 };
@@ -123,14 +114,16 @@ const float HUE_RANGE[] = { 0.0f, 180.0f };
 const float SATURATION_RANGE[] = { 0.0f, 256.0f };
 const float* HS_RANGES[] = { HUE_RANGE, SATURATION_RANGE };
 
-// rectify the table (perspective transformation)
+// part 1 - finding the balls
+
+// perspective transformation to a bird's-eye view, with bilinear interpolation
 Mat RectifyTable(const Mat& image, const Mat& perspective_matrix) {
 	Mat table_image;
 	warpPerspective(image, table_image, perspective_matrix, Size(TABLE_COLS, TABLE_ROWS), INTER_LINEAR);
 	return table_image;
 }
 
-// table boundary used for the transformation
+// figure - table outline on the original image
 Mat DrawTableCorners(const Mat& image) {
 	Mat display = image.clone();
 
@@ -148,7 +141,7 @@ Mat SmoothImage(const Mat& table_image) {
 	return smoothed_image;
 }
 
-// zoomed side-by-side of the same region (original | Gaussian | median)
+// figure - zoomed original | gaussian | median
 Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
 	Mat gaussian_image;
 	GaussianBlur(table_image, gaussian_image, Size(MEDIAN_FILTER_SIZE, MEDIAN_FILTER_SIZE), 1.5);
@@ -165,8 +158,7 @@ Mat MakeSmoothingComparison(const Mat& table_image, const Mat& median_image) {
 	return comparison;
 }
 
-// box around all the balls in the training image (from the AllBalls ground truth),
-// expanded by 2 ball diameters to cover the stretched balls
+// box around all the AllBalls balls, expanded by 2 diameters to cover the stretched balls
 Rect GetTrainingBallArea() {
 	int min_col = TABLE_COLS, max_col = 0, min_row = TABLE_ROWS, max_row = 0;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++) {
@@ -179,20 +171,17 @@ Rect GetTrainingBallArea() {
 	return Rect(Point(min_col - expand, min_row - expand), Point(max_col + expand, max_row + expand));
 }
 
-// which pixels of the training image are used as cloth samples (255 = sample, 0 = excluded)
+// cloth sample = table interior of the training image - the area with the balls
 Mat MakeClothSampleMask() {
-	// start with the table interior, away from the cushions and pockets
 	Mat mask(TABLE_ROWS, TABLE_COLS, CV_8UC1, Scalar(0));
 	rectangle(mask, Rect(CUSHION_MARGIN, CUSHION_MARGIN,
 		TABLE_COLS - 2 * CUSHION_MARGIN, TABLE_ROWS - 2 * CUSHION_MARGIN), Scalar(255), FILLED);
-	// remove the area containing the balls
 	rectangle(mask, GetTrainingBallArea(), Scalar(0), FILLED);
 	return mask;
 }
 
-// smooth the 2D histogram: each bin becomes the average of itself and its 8 neighbours
-// (2D version of the 1D histogram smoothing from the lectures).
-// Hue is circular, so it wraps around at the ends; saturation does not wrap.
+// 2D histogram smoothing - each bin = average of itself and its 8 neighbours
+// hue wraps around since it is circular, saturation doesn't 
 MatND SmoothHistogram(const MatND& histogram) {
 	MatND smoothed = histogram.clone();
 	for (int hue_bin = 0; hue_bin < HUE_BINS; hue_bin++)
@@ -213,7 +202,7 @@ MatND SmoothHistogram(const MatND& histogram) {
 	return smoothed;
 }
 
-// build the cloth model: 2D hue-saturation histogram of the cloth sample from the training image
+// cloth model - smoothed hue-saturation histogram of the cloth sample, max scaled to 255
 MatND BuildClothModel(const Mat& smoothed_training_image, const Mat& sample_mask) {
 	Mat hls_image;
 	cvtColor(smoothed_training_image, hls_image, COLOR_BGR2HLS);
@@ -222,12 +211,11 @@ MatND BuildClothModel(const Mat& smoothed_training_image, const Mat& sample_mask
 	calcHist(&hls_image, 1, HS_CHANNELS, sample_mask, cloth_histogram, 2, HS_BINS, HS_RANGES);
 	cloth_histogram = SmoothHistogram(cloth_histogram);
 
-	// normalise so the most common cloth colour = 255 (i.e. 1.0)
 	normalize(cloth_histogram, cloth_histogram, 0.0, 255.0, NORM_MINMAX);
 	return cloth_histogram;
 }
 
-// for the report: sampled areas shown normally, excluded areas darkened
+// figure - sampled cloth shown normally, everything else darkened
 Mat DrawClothSampleRegion(const Mat& training_image, const Mat& sample_mask) {
 	Mat display = training_image.clone();
 	Mat darkened = training_image * 0.3;
@@ -235,7 +223,7 @@ Mat DrawClothSampleRegion(const Mat& training_image, const Mat& sample_mask) {
 	return display;
 }
 
-// for the report: the 2D histogram as an image
+// figure - cloth histogram (rows = hue, columns = saturation)
 Mat DrawClothHistogram(const MatND& cloth_histogram) {
 	const int cell_size = 12;
 	Mat display(HUE_BINS * cell_size, SATURATION_BINS * cell_size, CV_8UC1, Scalar(0));
@@ -248,8 +236,7 @@ Mat DrawClothHistogram(const MatND& cloth_histogram) {
 	return display;
 }
 
-// back-projection: each pixel gets the histogram value for its (hue, saturation)
-// bright = looks like cloth, dark = does not (candidate ball)
+// back-projection - bright = looks like cloth, dark = not cloth
 Mat ComputeClothProbability(const Mat& smoothed_image, const MatND& cloth_histogram) {
 	Mat hls_image;
 	cvtColor(smoothed_image, hls_image, COLOR_BGR2HLS);
@@ -258,25 +245,21 @@ Mat ComputeClothProbability(const Mat& smoothed_image, const MatND& cloth_histog
 	return cloth_probability;
 }
 
-// threshold the cloth probability with Otsu's method -> binary mask
-// INVERSE threshold: low cloth probability -> white (255) = candidate ball, cloth -> black (0)
+// Otsu threshold (only used for comparison in the report)
 Mat ThresholdClothProbability(const Mat& cloth_probability, double& otsu_threshold) {
 	Mat ball_mask;
 	otsu_threshold = threshold(cloth_probability, ball_mask, 0, 255, THRESH_BINARY_INV | THRESH_OTSU);
 	return ball_mask;
 }
 
-// threshold at zero: a pixel is "not cloth" only if its (hue, saturation) has NO support
-// in the smoothed cloth model, i.e. that colour never appeared in (or next to) the cloth sample
+// a pixel is "not cloth" only if its colour has zero support in the cloth model 
 Mat ZeroSupportMask(const Mat& cloth_probability) {
 	Mat ball_mask;
 	threshold(cloth_probability, ball_mask, 0, 255, THRESH_BINARY_INV);   // > 0 -> 0 (cloth), 0 -> 255 (candidate ball)
 	return ball_mask;
 }
 
-// clean the binary mask with morphology:
-// opening (erosion then dilation) removes small specks and thin bridges,
-// then closing (dilation then erosion) fills small holes and gaps inside the balls
+// opening removes specks and thin bridges, then closing fills small holes
 Mat CleanMask(const Mat& ball_mask) {
 	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
 	Mat opened_mask, cleaned_mask;
@@ -285,8 +268,7 @@ Mat CleanMask(const Mat& ball_mask) {
 	return cleaned_mask;
 }
 
-// for the report: what the cleaning changed
-// white = kept, red = removed by cleaning, green = added by cleaning
+// figure - white = kept, red = removed, green = added
 Mat DrawMorphologyChanges(const Mat& before, const Mat& after) {
 	Mat display(before.size(), CV_8UC3, Scalar(0, 0, 0));
 	display.setTo(Scalar(255, 255, 255), before & after);
@@ -295,19 +277,17 @@ Mat DrawMorphologyChanges(const Mat& before, const Mat& after) {
 	return display;
 }
 
-// table structure (cushions, pockets, marks on the cloth) = everything that is "not cloth" in the
-// cleaned mask of the TRAINING image, apart from its balls. The camera is stationary, so these are
-// in the same place in every image. Dilated by the 5x5 element to allow for small lighting differences.
+// table structure (cushions, pockets, marks) = non-cloth parts of the training mask apart from its balls
+// the camera doesn't move so these are in the same place in every image
 Mat MakeTableStructureMask(const Mat& training_cleaned_mask) {
 	Mat structure_mask = training_cleaned_mask.clone();
 	rectangle(structure_mask, GetTrainingBallArea(), Scalar(0), FILLED);
 	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
-	dilate(structure_mask, structure_mask, element);
+	dilate(structure_mask, structure_mask, element);	// allow for small lighting differences
 	return structure_mask;
 }
 
-// object mask = cleaned mask AND NOT table structure,
-// then an opening (same 5x5 element) removes any thin leftover slivers of the cushion band
+// remove the table structure, then open again to get rid of leftover slivers
 Mat RemoveTableStructure(const Mat& cleaned_mask, const Mat& structure_mask) {
 	Mat object_mask = cleaned_mask & ~structure_mask;
 	Mat element(MORPHOLOGY_ELEMENT_SIZE, MORPHOLOGY_ELEMENT_SIZE, CV_8U, Scalar(1));
@@ -315,9 +295,7 @@ Mat RemoveTableStructure(const Mat& cleaned_mask, const Mat& structure_mask) {
 	return object_mask;
 }
 
-// connected components: the outer boundary (contour) of every separate white region.
-// OpenCV traces object boundaries with 8-adjacency (background 4-adjacency, as in the lectures).
-// Only the outermost contours are kept (holes inside regions are not needed).
+// connected components - outer boundary of each region (8-adjacency for objects)
 vector<vector<Point>> FindRegions(const Mat& object_mask) {
 	vector<vector<Point>> contours;
 	vector<Vec4i> hierarchy;
@@ -325,7 +303,7 @@ vector<vector<Point>> FindRegions(const Mat& object_mask) {
 	return contours;
 }
 
-// for the report: each region filled with a random colour (fixed seed, so colours repeat each run)
+// figure - each region in a random colour
 Mat DrawRegions(const Mat& table_image, const vector<vector<Point>>& regions) {
 	Mat display = Mat::zeros(table_image.size(), CV_8UC3);
 	RNG random_colours(12345);
@@ -336,9 +314,7 @@ Mat DrawRegions(const Mat& table_image, const vector<vector<Point>>& regions) {
 	return display;
 }
 
-// learn the area of ONE ball's region from the TRAINING image:
-// regions that contain exactly one ground-truth ball position are single balls;
-// the median of their areas is used (robust to one unusual region)
+// area of one ball = median area of the training regions that contain exactly one ball 
 double LearnSingleBallArea(const vector<vector<Point>>& training_regions) {
 	vector<double> single_areas;
 	for (int region = 0; region < (int)training_regions.size(); region++) {
@@ -361,8 +337,7 @@ double LearnSingleBallArea(const vector<vector<Point>>& training_regions) {
 	return median_area;
 }
 
-// classify a region using its features (area, minimum bounding rectangle width)
-// returns 0 = noise (rejected), 1 = single ball, 2+ = estimated number of merged balls
+// 0 = noise, 1 = single ball, 2+ = estimated number of merged balls
 int EstimateBallCount(const vector<Point>& region, double single_ball_area) {
 	double area = contourArea(region);
 	RotatedRect bounding_rectangle = minAreaRect(region);
@@ -374,7 +349,7 @@ int EstimateBallCount(const vector<Point>& region, double single_ball_area) {
 	return max(ball_count, 1);
 }
 
-// for the report: red = rejected, green = single ball, yellow = merged balls (labelled with the estimated count)
+// figure - red = rejected, green = single, yellow = merged (with estimated count)
 Mat DrawRegionClassification(const Mat& table_image, const vector<vector<Point>>& regions, const vector<int>& ball_counts) {
 	Mat display = table_image * 0.5;
 	for (int region = 0; region < (int)regions.size(); region++) {
@@ -390,16 +365,14 @@ Mat DrawRegionClassification(const Mat& table_image, const vector<vector<Point>>
 	return display;
 }
 
-// a ball "core" found by repeated erosion: its centre, and how many erosions it survived
+// a ball core from repeated erosion - its centre and how many erosions it survived
 struct BallCore {
 	Point2f centre;
 	int depth;
 };
 
-// split a merged region by repeated erosion (3x3 = 1mm per erosion).
-// Whenever a piece is about to disappear completely, it is recorded as a core:
-// its centre (from moments) and its depth (number of erosions survived).
-// erosion_depth accumulates, for every pixel, how many erosions it survived (for the report).
+// erode the region 1mm at a time; whe a piece is about to disappear, record it as a core
+// erosion_depth counts how many erosions each pixel survived (for the figure)
 vector<BallCore> FindBallCores(const vector<Point>& region, const Size& image_size, Mat& erosion_depth) {
 	Mat current = Mat::zeros(image_size, CV_8UC1);
 	vector<vector<Point>> region_list(1, region);
@@ -408,18 +381,17 @@ vector<BallCore> FindBallCores(const vector<Point>& region, const Size& image_si
 	Mat element(3, 3, CV_8U, Scalar(1));
 	vector<BallCore> cores;
 	for (int depth = 0; countNonZero(current) > 0; depth++) {
-		add(erosion_depth, Scalar(1), erosion_depth, current);   // every surviving pixel survived one more erosion
+		add(erosion_depth, Scalar(1), erosion_depth, current);  
 
 		Mat eroded;
 		erode(current, eroded, element);
 
-		// any piece with nothing left after this erosion is recorded as a core
 		vector<vector<Point>> pieces;
 		findContours(current, pieces, RETR_EXTERNAL, CHAIN_APPROX_NONE);
 		for (int piece = 0; piece < (int)pieces.size(); piece++) {
 			Mat piece_mask = Mat::zeros(image_size, CV_8UC1);
 			drawContours(piece_mask, pieces, piece, Scalar(255), FILLED, 8);
-			if (countNonZero(piece_mask & eroded) == 0) {
+			if (countNonZero(piece_mask & eroded) == 0) {			// piece vanieshes at the next erosion
 				Moments piece_moments = moments(piece_mask, true);
 				BallCore core;
 				core.centre = Point2f((float)(piece_moments.m10 / piece_moments.m00),
@@ -433,9 +405,7 @@ vector<BallCore> FindBallCores(const vector<Point>& region, const Size& image_si
 	return cores;
 }
 
-// keep only cores that are thick enough to be a ball, and suppress cores closer than one ball
-// diameter to a deeper core: two balls cannot overlap, so their centres are at least 43mm apart.
-// candidate_count returns how many cores there were before suppression (for the report).
+// keep cores thick enough to be a ball, deepest first, and drop any core closer than one ball diameter to a kept one (two balls can't overlap)
 vector<BallCore> SplitMergedRegion(const vector<Point>& region, const Size& image_size, Mat& erosion_depth, int& candidate_count) {
 	vector<BallCore> all_cores = FindBallCores(region, image_size, erosion_depth);
 
@@ -459,21 +429,20 @@ vector<BallCore> SplitMergedRegion(const vector<Point>& region, const Size& imag
 	return ball_cores;
 }
 
-// a detected ball: its position in table coordinates (x = column, y = row, in mm)
+// a detected ball in table coordinates (x = column, y = row)
 struct Detection {
 	Point2f position;
-	bool from_split;    // true if it was found by splitting a merged group (Step 8)
+	bool from_split;    // found by splitting a merged group 
 };
 
-// position of a single-ball region = its centroid from moments: (M10/M00, M01/M00)
+// centroid from moments - (M10/M00, M01/M00)
 Point2f RegionCentroid(const vector<Point>& region) {
 	Moments region_moments = moments(region);
 	return Point2f((float)(region_moments.m10 / region_moments.m00),
 		(float)(region_moments.m01 / region_moments.m00));
 }
 
-// for the report: a ball-sized circle at every detection
-// green = single-ball region, blue = split out of a merged group
+// figure - green = single region, blue = split from a group
 Mat DrawDetections(const Mat& table_image, const vector<Detection>& detections) {
 	Mat display = table_image.clone();
 	for (int i = 0; i < (int)detections.size(); i++) {
@@ -484,11 +453,13 @@ Mat DrawDetections(const Mat& table_image, const vector<Detection>& detections) 
 	return display;
 }
 
+// ground truth and part 1 evaluation 
+
 bool BallPresent(int image_no, int ball) {
 	return GROUND_TRUTH[image_no][ball][0] >= 0;
 }
 
-// true position as (x, y) = (column, row)
+// true position as (column, row)
 Point2f GroundTruthPosition(int image_no, int ball) {
 	return Point2f((float)GROUND_TRUTH[image_no][ball][1], (float)GROUND_TRUTH[image_no][ball][0]);
 }
@@ -497,7 +468,7 @@ string BallName(int ball) {
 	return (ball == 0) ? "W" : to_string(ball);
 }
 
-// automatic sanity check: warn about any ground-truth position outside the table
+// warn about any ground truth position outside the table
 void CheckGroundTruth() {
 	for (int image_no = 0; image_no < NUMBER_OF_IMAGES; image_no++)
 		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
@@ -507,8 +478,7 @@ void CheckGroundTruth() {
 				<< " is outside the table" << endl;
 }
 
-// for checking the ground truth: magenta circle at every true ball position, with its label
-// drawn beside the ball (so the ball's colour stays visible) in outlined text
+// figure - ground truth circles with labels beside the balls
 Mat DrawGroundTruth(const Mat& table_image, int image_no) {
 	Mat display = table_image.clone();
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
@@ -522,13 +492,12 @@ Mat DrawGroundTruth(const Mat& table_image, int image_no) {
 	return display;
 }
 
-// result of evaluating one image's detections against its ground truth
 struct EvaluationResult {
 	int true_positives = 0, false_positives = 0, false_negatives = 0;
 	double total_error = 0.0, total_row_error = 0.0, total_col_error = 0.0, max_error = 0.0;
 	vector<pair<int, int>> matches;      // (ball, detection)
-	vector<bool> ball_matched;           // per ball
-	vector<bool> detection_matched;      // per detection
+	vector<bool> ball_matched;           
+	vector<bool> detection_matched;      
 };
 
 double Precision(int tp, int fp) { return (tp + fp > 0) ? (double)tp / (tp + fp) : 0.0; }
@@ -537,15 +506,13 @@ double F1(double precision, double recall) {
 	return (precision + recall > 0.0) ? 2.0 * precision * recall / (precision + recall) : 0.0;
 }
 
-// one-to-one matching of detections to true balls within match_distance (closest pairs first),
-// then TP / FP / FN and position errors for the matches
+// one-to-one matching of detections to true balls (closest pairs first), then TP/FP/FN and errors
 EvaluationResult EvaluateDetections(const vector<Detection>& detections, int image_no, double match_distance) {
 	EvaluationResult result;
 	result.ball_matched.assign(NUMBER_OF_BALLS, false);
 	result.detection_matched.assign(detections.size(), false);
 
-	// every (ball, detection) pair within the matching distance
-	vector<pair<double, pair<int, int>>> candidate_pairs;
+	vector<pair<double, pair<int, int>>> candidate_pairs;		// (distance, (ball, detection))
 	int balls_present = 0;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 		if (BallPresent(image_no, ball)) {
@@ -556,9 +523,8 @@ EvaluationResult EvaluateDetections(const vector<Detection>& detections, int ima
 					candidate_pairs.push_back(make_pair(distance, make_pair(ball, detection)));
 			}
 		}
-	sort(candidate_pairs.begin(), candidate_pairs.end());   // closest first
+	sort(candidate_pairs.begin(), candidate_pairs.end());  
 
-	// accept a pair only if neither the ball nor the detection is already matched
 	for (int i = 0; i < (int)candidate_pairs.size(); i++) {
 		int ball = candidate_pairs[i].second.first;
 		int detection = candidate_pairs[i].second.second;
@@ -593,8 +559,7 @@ void PrintEvaluation(const EvaluationResult& result) {
 		<< " mm, mean column error = " << result.total_col_error / result.true_positives << " mm" << endl;
 }
 
-// for the report: green = match (circle at the true position, line to the detection),
-// red cross = false positive, yellow circle = missed ball (false negative)
+// figure - green = match, red cross = false positive, yellow = missed ball
 Mat DrawEvaluation(const Mat& table_image, const vector<Detection>& detections, int image_no, const EvaluationResult& result) {
 	Mat display = table_image.clone();
 	int radius = BALL_DIAMETER / 2;
@@ -614,8 +579,7 @@ Mat DrawEvaluation(const Mat& table_image, const vector<Detection>& detections, 
 	return display;
 }
 
-// overall results on the TEST images only (Table1-6): TP, FP, FN summed over the images first.
-// AllBalls is the training image, so it is not included.
+// overall results on the test images only (TP/FP/FN summed first)
 void PrintOverallResults(const vector<vector<Detection>>& all_detections, double match_distance) {
 	int tp = 0, fp = 0, fn = 0;
 	double total_error = 0.0, total_row_error = 0.0, total_col_error = 0.0;
@@ -638,12 +602,36 @@ void PrintOverallResults(const vector<vector<Detection>>& all_detections, double
 	cout << endl;
 }
 
-// Part 2 Step 2: the pixels used to describe each ball.
-// A pixel belongs to a ball's sample if it is
-//   1. in the object mask (not cloth, not table structure),
-//   2. within SAMPLE_RADIUS of the ball's position, and
-//   3. closer to this ball's position than to any other (the allocation step of k-means,
-//      with the ball positions as fixed exemplars), so neighbouring balls share pixels fairly.
+// figure - histogram of the cloth probability (log scale) wtih Otsu's threshold in red
+Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
+	int number_bins = 256;
+	int channels[] = { 0 };
+	float range[] = { 0.0f, 256.0f };
+	const float* ranges[] = { range };
+	MatND histogram;
+	calcHist(&cloth_probability, 1, channels, Mat(), histogram, 1, &number_bins, ranges);
+
+	const int height = 200;
+	const int bar_width = 2;
+	Mat display(height, number_bins * bar_width, CV_8UC3, Scalar(255, 255, 255));
+	double max_count;
+	minMaxLoc(histogram, nullptr, &max_count);
+	double log_max = log(1.0 + max_count);
+	for (int bin = 0; bin < number_bins; bin++) {
+		double count = histogram.at<float>(bin);
+		int bar_height = (int)(height * log(1.0 + count) / log_max);
+		rectangle(display, Point(bin * bar_width, height - bar_height),
+			Point(bin * bar_width + bar_width - 1, height - 1), Scalar(0, 0, 0), FILLED);
+	}
+	int threshold_x = (int)otsu_threshold * bar_width;
+	line(display, Point(threshold_x, 0), Point(threshold_x, height - 1), Scalar(0, 0, 255), 2);
+	return display;
+}
+
+// part 2 - recognising the balls
+
+// a ball's sample = object-mask pixels within SAMPLE_RADIUS that are closer to this ball
+// than to any other (like the k-means allocation step)
 vector<Mat> MakeBallSampleMasks(const vector<Point2f>& positions, const Mat& object_mask) {
 	vector<Mat> sample_masks;
 	Rect image_rect(0, 0, object_mask.cols, object_mask.rows);
@@ -655,15 +643,15 @@ vector<Mat> MakeBallSampleMasks(const vector<Point2f>& positions, const Mat& obj
 		for (int row = search_box.y; row < search_box.y + search_box.height; row++)
 			for (int col = search_box.x; col < search_box.x + search_box.width; col++) {
 				if (object_mask.at<uchar>(row, col) == 0)
-					continue;                                              // test 1: cloth or table structure
+					continue;                                              
 				Point2f pixel((float)col, (float)row);
 				double distance = norm(pixel - positions[ball]);
 				if (distance > SAMPLE_RADIUS)
-					continue;                                              // test 2: too far away
+					continue;                                             
 				bool nearest = true;
 				for (int other = 0; other < (int)positions.size(); other++)
 					if (other != ball && norm(pixel - positions[other]) < distance)
-						nearest = false;                                   // test 3: closer to another ball
+						nearest = false;                                  
 				if (nearest)
 					sample_mask.at<uchar>(row, col) = 255;
 			}
@@ -672,8 +660,7 @@ vector<Mat> MakeBallSampleMasks(const vector<Point2f>& positions, const Mat& obj
 	return sample_masks;
 }
 
-// for the report: each ball's sampled pixels in their real colours, everything else darkened,
-// with a small dot at each ball position
+// figure - sampled pixels in colour, everything else darkened
 Mat DrawBallSamples(const Mat& table_image, const vector<Point2f>& positions, const vector<Mat>& sample_masks) {
 	Mat display = table_image * 0.25;
 	for (int ball = 0; ball < (int)sample_masks.size(); ball++)
@@ -683,7 +670,6 @@ Mat DrawBallSamples(const Mat& table_image, const vector<Point2f>& positions, co
 	return display;
 }
 
-// smallest and average sample size (number of pixels) in an image
 void PrintSampleSizes(const vector<Mat>& sample_masks) {
 	if (sample_masks.empty())
 		return;
@@ -697,9 +683,9 @@ void PrintSampleSizes(const vector<Mat>& sample_masks) {
 		<< total / (int)sample_masks.size() << " pixels" << endl;
 }
 
-// which of the 288 bins a pixel's (hue, luminance, saturation) falls into
+// which of the 288 bins a pixel falls into
 int BallHistogramBin(const Vec3b& hls) {
-	int hue_bin = ((hls[0] + HUE_BIN_OFFSET) % 180) / HUE_BIN_WIDTH;   // shifted so red is not split
+	int hue_bin = ((hls[0] + HUE_BIN_OFFSET) % 180) / HUE_BIN_WIDTH;   
 	int luminance_bin = hls[1] / LEVEL_BIN_WIDTH;
 	int saturation_bin = hls[2] / LEVEL_BIN_WIDTH;
 	return (hue_bin * BALL_LUMINANCE_BINS + luminance_bin) * BALL_SATURATION_BINS + saturation_bin;
@@ -710,7 +696,7 @@ Scalar BinColour(int bin) {
 	int saturation_bin = bin % BALL_SATURATION_BINS;
 	int luminance_bin = (bin / BALL_SATURATION_BINS) % BALL_LUMINANCE_BINS;
 	int hue_bin = bin / (BALL_SATURATION_BINS * BALL_LUMINANCE_BINS);
-	int hue = (hue_bin * HUE_BIN_WIDTH + HUE_BIN_WIDTH / 2 - HUE_BIN_OFFSET + 180) % 180;   // undo the shift
+	int hue = (hue_bin * HUE_BIN_WIDTH + HUE_BIN_WIDTH / 2 - HUE_BIN_OFFSET + 180) % 180;   
 	Mat hls_colour(1, 1, CV_8UC3, Scalar(hue, luminance_bin * LEVEL_BIN_WIDTH + LEVEL_BIN_WIDTH / 2,
 		saturation_bin * LEVEL_BIN_WIDTH + LEVEL_BIN_WIDTH / 2));
 	Mat bgr_colour;
@@ -719,8 +705,7 @@ Scalar BinColour(int bin) {
 	return Scalar(colour[0], colour[1], colour[2]);
 }
 
-// 3D (hue, luminance, saturation) histogram of a ball's sample pixels, normalised so it sums to 1
-// (proportions, so partial balls with fewer pixels can still be compared with whole balls)
+// 3D colour histogram of a ball's sample, normalised to sum to 1 (so partial balls can be compared)
 Mat BallColourHistogram(const Mat& hls_image, const Mat& sample_mask) {
 	Mat histogram = Mat::zeros(1, BALL_HISTOGRAM_SIZE, CV_32F);
 	if (countNonZero(sample_mask) == 0)
@@ -737,8 +722,7 @@ Mat BallColourHistogram(const Mat& hls_image, const Mat& sample_mask) {
 	return histogram;
 }
 
-// fraction of a ball's pixels that are "white", where white = the typical colours of the white ball
-// in the training image (bins holding more than an even share, 1/288, of the white ball's pixels)
+// fraction of white pixels, where white = bins holding more than an even share of the white ball
 double WhiteFraction(const Mat& histogram, const Mat& white_ball_histogram) {
 	double white_fraction = 0.0;
 	for (int bin = 0; bin < BALL_HISTOGRAM_SIZE; bin++)
@@ -747,8 +731,7 @@ double WhiteFraction(const Mat& histogram, const Mat& white_ball_histogram) {
 	return white_fraction;
 }
 
-// for the report: each ball's "colour signature" = its 6 most common bins, drawn as one bar split
-// in proportion to their shares, each part filled with that bin's colour
+// figure - each ball's 6 most common colour bins as a bar
 Mat DrawColourSignatures(const vector<Mat>& histograms) {
 	const int row_height = 30, label_width = 50, bar_width = 400;
 	Mat display((int)histograms.size() * row_height, label_width + bar_width, CV_8UC3, Scalar(255, 255, 255));
@@ -756,7 +739,7 @@ Mat DrawColourSignatures(const vector<Mat>& histograms) {
 		vector<pair<float, int>> bins;
 		for (int bin = 0; bin < BALL_HISTOGRAM_SIZE; bin++)
 			bins.push_back(make_pair(histograms[ball].at<float>(0, bin), bin));
-		sort(bins.rbegin(), bins.rend());                         // most common first
+		sort(bins.rbegin(), bins.rend());                         
 		putText(display, BallName(ball), Point(8, ball * row_height + 21), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 2);
 		int x = label_width;
 		for (int i = 0; i < 6; i++) {
@@ -769,10 +752,8 @@ Mat DrawColourSignatures(const vector<Mat>& histograms) {
 	return display;
 }
 
-// Part 2 Step 5: dissimilarity between two ball colour histograms (smaller = more similar).
-// Default = Bhattacharyya distance: designed for normalised histograms (probability distributions);
-// the square root reduces the dominance of large bins; 0 = identical, 1 = no overlap.
-// Correlation and intersection are similarities (1 = identical), so they are turned into 1 - score.
+// distance between two histograms (smaller = more similar). Bhattacharyya by default
+// correlation and intersection are similarities so they're turned into 1 - score
 double HistogramDistance(const Mat& histogram1, const Mat& histogram2, int method = HISTCMP_BHATTACHARYYA) {
 	double score = compareHist(histogram1, histogram2, method);
 	if (method == HISTCMP_CORREL || method == HISTCMP_INTERSECT)
@@ -780,14 +761,14 @@ double HistogramDistance(const Mat& histogram1, const Mat& histogram2, int metho
 	return score;
 }
 
-// recognise each detection independently: the label of the closest training ball
-vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {   // <-- changed
+// each detection gets the label of the closest training ball
+vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {  
 	vector<int> labels;
 	for (int detection = 0; detection < (int)detection_histograms.size(); detection++) {
 		int best_ball = 0;
-		double best_distance = HistogramDistance(detection_histograms[detection], training_histograms[0], method);   // <-- changed
+		double best_distance = HistogramDistance(detection_histograms[detection], training_histograms[0], method);   
 		for (int ball = 1; ball < NUMBER_OF_BALLS; ball++) {
-			double distance = HistogramDistance(detection_histograms[detection], training_histograms[ball], method);   // <-- changed
+			double distance = HistogramDistance(detection_histograms[detection], training_histograms[ball], method);   
 			if (distance < best_distance) {
 				best_distance = distance;
 				best_ball = ball;
@@ -798,15 +779,14 @@ vector<int> RecogniseBallsIndependently(const vector<Mat>& detection_histograms,
 	return labels;
 }
 
-// recognise all detections in an image together, using the fact that each ball appears at most once:
-// all (detection, ball) pairs are sorted closest first, and a pair is accepted only if neither the
-// detection nor the label has been used yet (the most confident matches are made first)
-vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {   // <-- changed
+// same, but each ball can only be used once - all (detection, ball) pairs sorted closest first
+// a pair is accepted only if neither the detection nor the label is used yet
+vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector<Mat>& training_histograms, int method = HISTCMP_BHATTACHARYYA) {   
 	vector<pair<double, pair<int, int>>> candidate_pairs;     // (distance, (detection, ball))
 	for (int detection = 0; detection < (int)detection_histograms.size(); detection++)
 		for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 			candidate_pairs.push_back(make_pair(
-				HistogramDistance(detection_histograms[detection], training_histograms[ball], method),   // <-- changed
+				HistogramDistance(detection_histograms[detection], training_histograms[ball], method),   
 				make_pair(detection, ball)));
 	sort(candidate_pairs.begin(), candidate_pairs.end());
 
@@ -823,7 +803,7 @@ vector<int> RecogniseBalls(const vector<Mat>& detection_histograms, const vector
 	return labels;
 }
 
-// for the report: each detection with its recognised label written beside it
+// figure - each detection with its recognised label
 Mat DrawRecognition(const Mat& table_image, const vector<Detection>& detections, const vector<int>& labels) {
 	Mat display = table_image.clone();
 	for (int i = 0; i < (int)detections.size(); i++) {
@@ -837,14 +817,14 @@ Mat DrawRecognition(const Mat& table_image, const vector<Detection>& detections,
 	return display;
 }
 
-// Part 2 Step 6: recognition results for one image.
-// true_labels[d] = the ground-truth ball that detection d was matched to in Part 1 (-1 = false positive)
+// part 2 evaluation
+
+// true_labels[d] = ball that detection d was matched to in Part 1 (-1 = false positive)
 struct RecognitionResult {
 	int located = 0, correct = 0, balls_present = 0;
 	vector<int> true_labels;
 };
 
-// compare recognised labels with the true labels of the detections that Part 1 matched to real balls
 RecognitionResult EvaluateRecognition(const vector<int>& labels, const EvaluationResult& detection_evaluation, int image_no) {
 	RecognitionResult result;
 	result.true_labels.assign(labels.size(), -1);
@@ -870,15 +850,13 @@ void PrintRecognition(const RecognitionResult& result) {
 		<< (result.balls_present > 0 ? (double)result.correct / result.balls_present : 0.0) << ")" << endl;
 }
 
-// draw a label in outlined text beside a ball
 void DrawLabel(Mat& display, const Point2f& position, const string& text, const Scalar& colour) {
 	Point2f label_position = position + Point2f((float)(BALL_DIAMETER / 2 + 2), 6.0f);
 	putText(display, text, label_position, FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 0, 0), 4);
 	putText(display, text, label_position, FONT_HERSHEY_SIMPLEX, 0.6, colour, 2);
 }
 
-// for the report: green = correctly recognised, red "a (b)" = recognised as a but actually b,
-// grey = false positive detection (no true ball), yellow circle = missed ball (with its true label)
+// figure - green = correct, red "a (b)" = recognised as a but actually b, grey = false positive, yellow = missed ball
 Mat DrawRecognitionResult(const Mat& table_image, const vector<Detection>& detections, const vector<int>& labels,
 	const RecognitionResult& recognition, const EvaluationResult& detection_evaluation, int image_no) {
 	Mat display = table_image.clone();
@@ -890,11 +868,11 @@ Mat DrawRecognitionResult(const Mat& table_image, const vector<Detection>& detec
 	for (int i = 0; i < (int)detections.size(); i++) {
 		int true_label = recognition.true_labels[i];
 		string text = (labels[i] >= 0) ? BallName(labels[i]) : "?";
-		Scalar colour = Scalar(160, 160, 160);                          // false positive
+		Scalar colour = Scalar(160, 160, 160);                         
 		if (true_label >= 0 && labels[i] == true_label)
-			colour = Scalar(0, 255, 0);                                 // correct
+			colour = Scalar(0, 255, 0);                                 
 		else if (true_label >= 0) {
-			colour = Scalar(0, 0, 255);                                 // wrong
+			colour = Scalar(0, 0, 255);                              
 			text += " (" + BallName(true_label) + ")";
 		}
 		circle(display, detections[i].position, BALL_DIAMETER / 2, colour, 2);
@@ -927,7 +905,7 @@ void PrintConfusionMatrix(const int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS])
 	}
 }
 
-// confusion matrix as an image: green = correct, red = confused
+// figure - confusion matrix, green = correct, red = confused
 Mat DrawConfusionMatrix(const int confusion[NUMBER_OF_BALLS][NUMBER_OF_BALLS]) {
 	const int cell = 40, header = 40;
 	int size = header + NUMBER_OF_BALLS * cell + 1;
@@ -975,34 +953,8 @@ void PrintRecognitionComparison(const vector<vector<Detection>>& all_detections,
 		}
 }
 
-// for the report: histogram of the cloth probability image (log scale so small counts are visible)
-// with Otsu's threshold marked as a red line
-Mat DrawProbabilityHistogram(const Mat& cloth_probability, double otsu_threshold) {
-	int number_bins = 256;
-	int channels[] = { 0 };
-	float range[] = { 0.0f, 256.0f };
-	const float* ranges[] = { range };
-	MatND histogram;
-	calcHist(&cloth_probability, 1, channels, Mat(), histogram, 1, &number_bins, ranges);
+// utilities
 
-	const int height = 200;
-	const int bar_width = 2;
-	Mat display(height, number_bins * bar_width, CV_8UC3, Scalar(255, 255, 255));
-	double max_count;
-	minMaxLoc(histogram, nullptr, &max_count);
-	double log_max = log(1.0 + max_count);
-	for (int bin = 0; bin < number_bins; bin++) {
-		double count = histogram.at<float>(bin);
-		int bar_height = (int)(height * log(1.0 + count) / log_max);
-		rectangle(display, Point(bin * bar_width, height - bar_height),
-			Point(bin * bar_width + bar_width - 1, height - 1), Scalar(0, 0, 0), FILLED);
-	}
-	int threshold_x = (int)otsu_threshold * bar_width;
-	line(display, Point(threshold_x, 0), Point(threshold_x, height - 1), Scalar(0, 0, 255), 2);
-	return display;
-}
-
-// load one of the pool images
 Mat LoadImage(int image_no) {
 	string filename = string(FILE_LOCATION) + POOL_FILES[image_no];
 	Mat image = imread(filename, IMREAD_COLOR);
@@ -1011,7 +963,7 @@ Mat LoadImage(int image_no) {
 	return image;
 }
 
-// save an image to the results folder
+// saves as Results/<step>_<image>.png
 void SaveResult(const string& step_name, int image_no, const Mat& image) {
 	string image_name = POOL_FILES[image_no];
 	image_name = image_name.substr(0, image_name.find('.'));      
@@ -1020,32 +972,36 @@ void SaveResult(const string& step_name, int image_no, const Mat& image) {
 		cout << "Could not save " << filename << " (does the Results folder exist?)" << endl;
 }
 
+// main
+
 void MyApplication() {
+	// same transformation for every image since the camera doesn't move
 	Mat perspective_matrix = getPerspectiveTransform(IMAGE_CORNERS, TABLE_CORNERS);
 	cout << "Perspective transformation matrix:" << endl << perspective_matrix << endl << endl;
 
 	CheckGroundTruth();
 
-	// ---- Training: build the cloth colour model from AllBalls.jpeg ONLY ----
+	// training (AllBalls only)
 	Mat training_image = LoadImage(TRAINING_IMAGE_INDEX);
 	if (training_image.empty())
 		return;
-	Mat training_table = RectifyTable(training_image, perspective_matrix);   // unsmoothed (used for ball colours)
+	Mat training_table = RectifyTable(training_image, perspective_matrix);   
 	Mat training_smoothed = SmoothImage(training_table);
+
+	// cloth model
 	Mat sample_mask = MakeClothSampleMask();
 	MatND cloth_histogram = BuildClothModel(training_smoothed, sample_mask);
-
 	Mat sample_display = DrawClothSampleRegion(training_smoothed, sample_mask);
 	Mat histogram_display = DrawClothHistogram(cloth_histogram);
 	SaveResult("Step3_ClothSample", TRAINING_IMAGE_INDEX, sample_display);
 	SaveResult("Step3_ClothHistogram", TRAINING_IMAGE_INDEX, histogram_display);
 
-	// table structure: run the training image through Steps 3-5, then remove its balls
+	// table structure mask
 	Mat training_cleaned = CleanMask(ZeroSupportMask(ComputeClothProbability(training_smoothed, cloth_histogram)));
 	Mat structure_mask = MakeTableStructureMask(training_cleaned);
 	SaveResult("Step6_TableStructure", TRAINING_IMAGE_INDEX, structure_mask);
 
-	// single ball area: run the training image through Step 6, then look at regions containing exactly one ball
+	// area of a single ball
 	Mat training_object_mask = RemoveTableStructure(training_cleaned, structure_mask);
 	double single_ball_area = LearnSingleBallArea(FindRegions(training_object_mask));
 	if (single_ball_area <= 0.0) {
@@ -1053,7 +1009,7 @@ void MyApplication() {
 		return;
 	}
 
-	// Part 2 Step 2: pixel samples of the 16 labelled balls in AllBalls, at their ground-truth positions
+	// pixel samples of the 16 training balls at their true positions
 	vector<Point2f> training_positions;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 		training_positions.push_back(GroundTruthPosition(TRAINING_IMAGE_INDEX, ball));
@@ -1063,13 +1019,13 @@ void MyApplication() {
 	PrintSampleSizes(training_samples);
 	SaveResult("Part2_Step2_TrainingSamples", TRAINING_IMAGE_INDEX, training_samples_display);
 
-	// Part 2 Step 3: colour features of the 16 training balls (from the UNSMOOTHED image)
+	// colour histograms of the training balls (from the unsmoothed image)
 	Mat training_hls;
 	cvtColor(training_table, training_hls, COLOR_BGR2HLS);
 	vector<Mat> training_histograms;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
 		training_histograms.push_back(BallColourHistogram(training_hls, training_samples[ball]));
-	Mat white_ball_histogram = training_histograms[0];         // ball 0 = the white ball
+	Mat white_ball_histogram = training_histograms[0];      
 
 	cout << "Training ball features (white fraction):" << endl;
 	for (int ball = 0; ball < NUMBER_OF_BALLS; ball++)
@@ -1093,7 +1049,7 @@ void MyApplication() {
 	waitKey(0);
 	cv::destroyAllWindows();
 
-	// ---- Process every image ----
+	// process every image
 	namedWindow("Recognition (Part 2 Step 5)", WINDOW_NORMAL);
 	namedWindow("Recognition result (Part 2 Step 6): green = correct, red = wrong (true), grey = false positive, yellow = missed", WINDOW_NORMAL);
 
@@ -1109,22 +1065,21 @@ void MyApplication() {
 			continue;
 		cout << POOL_FILES[image_no] << " - press any key for the next image" << endl;
 
-		// Step 1: rectify
+		// step 1 - rectify
 		Mat table_image = RectifyTable(image, perspective_matrix);
 		SaveResult("Step1_Corners", image_no, DrawTableCorners(image));
 		SaveResult("Step1_Rectified", image_no, table_image);
 
-		// Step 2: smooth
+		// step 2 - smooth
 		Mat smoothed_image = SmoothImage(table_image);
 		SaveResult("Step2_Smoothed", image_no, smoothed_image);
 		SaveResult("Step2_Comparison", image_no, MakeSmoothingComparison(table_image, smoothed_image));
 
-		// Step 3: cloth probability (back-projection of the cloth model)
+		// step 3 - cloth probability 
 		Mat cloth_probability = ComputeClothProbability(smoothed_image, cloth_histogram);
 		SaveResult("Step3_ClothProbability", image_no, cloth_probability);
 
-		// Step 4: threshold -> binary mask of candidate ball pixels
-		// Otsu's mask is computed for comparison only; the zero-support mask is used
+		// step 4 - threshold (Otsu kept only for comparison)
 		double otsu_threshold;
 		Mat otsu_mask = ThresholdClothProbability(cloth_probability, otsu_threshold);
 		Mat ball_mask = ZeroSupportMask(cloth_probability);
@@ -1133,23 +1088,22 @@ void MyApplication() {
 		SaveResult("Step4_Mask", image_no, ball_mask);
 		SaveResult("Step4_Histogram", image_no, DrawProbabilityHistogram(cloth_probability, otsu_threshold));
 
-		// Step 5: clean the mask (opening then closing)
+		// step 5: morphology
 		Mat cleaned_mask = CleanMask(ball_mask);
 		Mat morphology_changes = DrawMorphologyChanges(ball_mask, cleaned_mask);
 		SaveResult("Step5_CleanedMask", image_no, cleaned_mask);
 		SaveResult("Step5_Changes", image_no, morphology_changes);
 
-		// Step 6A: remove the table structure (cushions, pockets, marks)
+		// step 6 - remove table structure, then connected components
 		Mat object_mask = RemoveTableStructure(cleaned_mask, structure_mask);
 		SaveResult("Step6_ObjectMask", image_no, object_mask);
 
-		// Step 6B: connected components -> list of regions
 		vector<vector<Point>> regions = FindRegions(object_mask);
 		Mat regions_display = DrawRegions(table_image, regions);
 		cout << "   regions found = " << regions.size() << endl;
 		SaveResult("Step6_Regions", image_no, regions_display);
 
-		// Step 7: classify each region as noise / single ball / merged balls
+		// step 7 - classify regions
 		vector<int> ball_counts;
 		int singles = 0, groups = 0, rejected = 0, estimated_balls = 0;
 		for (int region = 0; region < (int)regions.size(); region++) {
@@ -1165,7 +1119,7 @@ void MyApplication() {
 		Mat classification_display = DrawRegionClassification(table_image, regions, ball_counts);
 		SaveResult("Step7_Classification", image_no, classification_display);
 
-		// Step 8: split merged groups into individual balls (repeated erosion)
+		// step 8 - split merged groups
 		vector<BallCore> split_balls;
 		Mat erosion_depth = Mat::zeros(table_image.size(), CV_8UC1);
 		for (int region = 0; region < (int)regions.size(); region++)
@@ -1179,7 +1133,7 @@ void MyApplication() {
 				split_balls.insert(split_balls.end(), cores.begin(), cores.end());
 			}
 
-		// Step 9: ball positions in table coordinates (mm)
+		// step 9 - ball positions
 		vector<Detection> detections;
 		for (int region = 0; region < (int)regions.size(); region++)
 			if (ball_counts[region] == 1) {
@@ -1204,11 +1158,10 @@ void MyApplication() {
 		SaveResult("Step8_ErosionDepth", image_no, erosion_depth * 10);
 		SaveResult("Step9_Detections", image_no, detections_display);
 
-		// Step 10: ground truth (drawn first, to check it visually)
+		// step 10 - evaluate detection
 		Mat ground_truth_display = DrawGroundTruth(table_image, image_no);
 		SaveResult("Step10_GroundTruth", image_no, ground_truth_display);
 
-		// Step 10: evaluation against the ground truth
 		EvaluationResult evaluation = EvaluateDetections(detections, image_no, MATCH_DISTANCE);
 		PrintEvaluation(evaluation);
 		Mat evaluation_display = DrawEvaluation(table_image, detections, image_no, evaluation);
@@ -1216,7 +1169,7 @@ void MyApplication() {
 
 		all_detections[image_no] = detections;
 
-		// Part 2 Step 2: pixel samples of each detected ball
+		// part 2 - pixel samples of each detected ball
 		vector<Point2f> detected_positions;
 		for (int i = 0; i < (int)detections.size(); i++)
 			detected_positions.push_back(detections[i].position);
@@ -1225,7 +1178,7 @@ void MyApplication() {
 		PrintSampleSizes(detection_samples);
 		SaveResult("Part2_Step2_Samples", image_no, samples_display);
 
-		// Part 2 Step 5: recognise each detected ball (colours from the UNSMOOTHED image)
+		// part 2 - recognise (colurs from the unsmoothed image)
 		Mat hls_image;
 		cvtColor(table_image, hls_image, COLOR_BGR2HLS);
 		vector<Mat> detection_histograms;
@@ -1247,7 +1200,7 @@ void MyApplication() {
 		Mat recognition_display = DrawRecognition(table_image, detections, labels);
 		SaveResult("Part2_Step5_Recognition", image_no, recognition_display);
 
-		// Part 2 Step 6: evaluate recognition against the ground-truth labels
+		// part 2 - evaluate recognition
 		RecognitionResult recognition = EvaluateRecognition(labels, evaluation, image_no);
 		PrintRecognition(recognition);
 		Mat recognition_result_display = DrawRecognitionResult(table_image, detections, labels, recognition, evaluation, image_no);
@@ -1270,17 +1223,16 @@ void MyApplication() {
 	}
 	cv::destroyAllWindows();
 
-	// ---- Overall results on the test images (Table1-6) ----
+	// part 1 overall results
 	cout << endl << "OVERALL RESULTS (test images Table1-6, training image excluded):" << endl;
 	PrintOverallResults(all_detections, MATCH_DISTANCE);
 
-	// sensitivity to the matching distance (evaluation only - nothing in the method is changed)
 	cout << endl << "Sensitivity to the matching distance:" << endl;
 	const double distances[] = { 10.0, BALL_DIAMETER / 2.0, 32.0, (double)BALL_DIAMETER };
 	for (int i = 0; i < 4; i++)
 		PrintOverallResults(all_detections, distances[i]);
 
-	// Part 2 overall results (test images only)
+	// part 2 overall results (test images only)
 	cout << endl << "PART 2 RECOGNITION RESULTS (test images Table1-6):" << endl << fixed << setprecision(2)
 		<< "   recognition accuracy: " << total_correct << " of " << total_located << " located balls = "
 		<< (total_located > 0 ? (double)total_correct / total_located : 0.0) << endl
